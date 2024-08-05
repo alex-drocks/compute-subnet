@@ -276,8 +276,9 @@ class Miner:
                 # Check if the miner has the axon version info updated
                 subnet_axon_version: bt.AxonInfo = self.metagraph.neurons[self.miner_subnet_uid].axon_info
                 current_version = __version_as_int__
-                if subnet_axon_version.version != current_version:
-                    bt.logging.info("Axon info version has been changed. Needs to restart axon...")
+                axon_version = subnet_axon_version.version
+                if axon_version != current_version:
+                    bt.logging.info(f"Axon info version ({axon_version}) is not equal to current ({current_version}). Needs to restart axon...")
                     self.axon.stop()
                     self.init_axon()
 
