@@ -267,20 +267,20 @@ class Miner:
             entity="miner",
         )
 
-        # Check for auto update
-        if self.config.auto_update:
-            try_update()
+        # # Check for auto update
+        # if self.config.auto_update:
+        #     try_update()
 
-        if hasattr(self, "axon"):
-            if self.axon:
-                # Check if the miner has the axon version info updated
-                subnet_axon_version: bt.AxonInfo = self.metagraph.neurons[self.miner_subnet_uid].axon_info
-                current_version = __version_as_int__
-                axon_version = subnet_axon_version.version
-                if axon_version != current_version:
-                    bt.logging.info(f"Axon info version ({axon_version}) is not equal to current ({current_version}). Needs to restart axon...")
-                    self.axon.stop()
-                    self.init_axon()
+        # if hasattr(self, "axon"):
+        #     if self.axon:
+        #         # Check if the miner has the axon version info updated
+        #         subnet_axon_version: bt.AxonInfo = self.metagraph.neurons[self.miner_subnet_uid].axon_info
+        #         current_version = __version_as_int__
+        #         axon_version = subnet_axon_version.version
+        #         if axon_version != current_version:
+        #             bt.logging.info(f"Axon info version ({axon_version}) is not equal to current ({current_version}). Needs to restart axon...")
+        #             self.axon.stop()
+        #             self.init_axon()
 
     def base_blacklist(self, synapse: typing.Union[Specs, Allocate, Challenge]) -> typing.Tuple[bool, str]:
         hotkey = synapse.dendrite.hotkey
