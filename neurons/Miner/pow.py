@@ -15,7 +15,9 @@
 # DEALINGS IN THE SOFTWARE.
 import shlex
 import subprocess
-from typing import Union
+import traceback
+from typing import TypedDict, Union
+import uuid
 
 import bittensor as bt
 import time
@@ -26,6 +28,12 @@ from collections import deque
 
 
 queue = deque()
+
+
+class PowResult(TypedDict):
+    password: Union[str, None]
+    local_execution_time: float
+    error: Union[str, None]
 
 
 def check_cuda_availability():
@@ -47,7 +55,6 @@ def hashcat_verify(_hash, output) -> Union[str, None]:
     return None
 
 
-# @fifo
 def run_hashcat(
     run_id: str,
     _hash: str,
@@ -58,37 +65,12 @@ def run_hashcat(
     timeout: int = compute.pow_timeout,
     hashcat_path: str = compute.miner_hashcat_location,
     hashcat_workload_profile: str = compute.miner_hashcat_workload_profile,
-    hashcat_extended_options: str = compute.miner_hashcat_extended_options,
-    initial_start_time=None,
-    execution_time=None,
+    session: str = None,
 ):
-    if initial_start_time:
-        start_time = initial_start_time
-        real_timeout = timeout - (time.time() - initial_start_time)
-    else:
-        start_time = time.time()
-        real_timeout = timeout - (time.time() - start_time)
+    start_time = time.time()
 
-    if queue and queue[0] != run_id:
-        time.sleep(1)
-        execution_time = time.time() - start_time
-        return run_hashcat(
-            run_id=run_id,
-            _hash=_hash,
-            salt=salt,
-            mode=mode,
-            chars=chars,
-            mask=mask,
-            hashcat_path=hashcat_path,
-            hashcat_workload_profile=hashcat_workload_profile,
-            hashcat_extended_options=hashcat_extended_options,
-            initial_start_time=start_time,
-            execution_time=execution_time,
-        )
-    else:
-        bt.logging.info(f"{run_id}: ♻️  Challenge processing")
+    bt.logging.info(f"{run_id}: ♻️  Challenge processing")
 
-    unknown_error_message = f"{run_id}: ❌ run_hashcat execution failed"
     try:
         command = [
             hashcat_path,
@@ -104,51 +86,44 @@ def run_hashcat(
             mask,
             "-w",
             hashcat_workload_profile,
-            hashcat_extended_options,
+            "--session",
+            session,
+            "--optimized-kernel-enable",
         ]
         command_str = " ".join(shlex.quote(arg) for arg in command)
         bt.logging.trace(command_str)
 
-        if execution_time and execution_time >= timeout:
-            raise subprocess.TimeoutExpired(command, timeout)
-
         process = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=real_timeout,
+            command, capture_output=True, text=True, timeout=timeout
         )
 
         execution_time = time.time() - start_time
 
-        # If hashcat returns a valid result
-        if process.returncode == 0:
-            if process.stdout:
-                result = hashcat_verify(_hash, process.stdout)
+        if process.returncode == 0 and process.stdout:
+            result = hashcat_verify(_hash, process.stdout)
+            if result:
                 bt.logging.success(
                     f"{run_id}: ✅ Challenge {result} found in {execution_time:0.2f} seconds !"
                 )
-                queue.popleft()
                 return {
                     "password": result,
                     "local_execution_time": execution_time,
                     "error": None,
                 }
-        else:
-            error_message = f"{run_id}: ❌ Hashcat execution failed with code {process.returncode}: {process.stderr}"
-            bt.logging.warning(error_message)
-            queue.popleft()
-            return {
-                "password": None,
-                "local_execution_time": execution_time,
-                "error": error_message,
-            }
+        error_message = f"{run_id}: ❌ Hashcat execution failed with code {process.returncode}: {process.stderr}"
+        bt.logging.warning(error_message)
+        return {
+            "password": None,
+            "local_execution_time": execution_time,
+            "error": error_message,
+        }
 
     except subprocess.TimeoutExpired:
         execution_time = time.time() - start_time
-        error_message = f"{run_id}: ❌ Hashcat execution timed out"
+        error_message = (
+            f"{run_id}: ❌ Hashcat execution timed out ({execution_time:0.2f})"
+        )
         bt.logging.warning(error_message)
-        queue.popleft()
         return {
             "password": None,
             "local_execution_time": execution_time,
@@ -156,20 +131,14 @@ def run_hashcat(
         }
     except Exception as e:
         execution_time = time.time() - start_time
+        traceback.print_exc()
+        unknown_error_message = f"{run_id}: ❌ run_hashcat execution failed"
         bt.logging.warning(f"{unknown_error_message}: {e}")
-        queue.popleft()
         return {
             "password": None,
             "local_execution_time": execution_time,
             "error": f"{unknown_error_message}: {e}",
         }
-    bt.logging.warning(f"{unknown_error_message}: no exceptions")
-    queue.popleft()
-    return {
-        "password": None,
-        "local_execution_time": execution_time,
-        "error": f"{unknown_error_message}: no exceptions",
-    }
 
 
 def run_miner_pow(
@@ -181,25 +150,22 @@ def run_miner_pow(
     mask: str,
     hashcat_path: str = compute.miner_hashcat_location,
     hashcat_workload_profile: str = compute.miner_hashcat_workload_profile,
-    hashcat_extended_options: str = "",
-):
-    if len(queue) <= 0:
-        bt.logging.info(f"{run_id}: 💻 Challenge received")
-    else:
-        bt.logging.info(f"{run_id}: ⏳ An instance running - added in the queue.")
+) -> PowResult:
+    try:
+        queue.append(run_id)
+        result: PowResult = run_hashcat(
+            run_id=run_id,
+            _hash=_hash,
+            salt=salt,
+            mode=mode,
+            chars=chars,
+            mask=mask,
+            hashcat_path=hashcat_path,
+            hashcat_workload_profile=hashcat_workload_profile,
+            session=str(uuid.uuid4()).replace("-", ""),
+            timeout=compute.pow_timeout,
+        )
+    finally:
+        queue.remove(run_id)
 
-    # Add to the queue the challenge id
-    queue.append(run_id)
-
-    result = run_hashcat(
-        run_id=run_id,
-        _hash=_hash,
-        salt=salt,
-        mode=mode,
-        chars=chars,
-        mask=mask,
-        hashcat_path=hashcat_path,
-        hashcat_workload_profile=hashcat_workload_profile,
-        hashcat_extended_options=hashcat_extended_options,
-    )
     return result

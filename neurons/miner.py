@@ -160,6 +160,7 @@ class Miner:
 
         # Step 4: Initialize wandb
         self.wandb = ComputeWandb(self.config, self.wallet, os.path.basename(__file__))
+        os.environ["WANDB_SILENT"] = "true"
         self.wandb.update_specs()
 
         # check allocation status
