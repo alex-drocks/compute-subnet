@@ -100,7 +100,7 @@ def serve_extrinsic(
         wallet.hotkey.ss58_address, netuid=netuid
     )
     neuron_up_to_date = not neuron.is_null and params == {
-        "version": version,
+        "version": neuron.axon_info.version,
         "ip": net.ip_to_int(neuron.axon_info.ip),
         "port": neuron.axon_info.port,
         "ip_type": neuron.axon_info.ip_type,
