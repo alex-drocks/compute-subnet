@@ -150,6 +150,7 @@ def run_miner_pow(
     mask: str,
     hashcat_path: str = compute.miner_hashcat_location,
     hashcat_workload_profile: str = compute.miner_hashcat_workload_profile,
+    hashcat_extended_options: str = compute.miner_hashcat_extended_options,
 ) -> PowResult:
     try:
         queue.append(run_id)
