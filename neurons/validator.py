@@ -54,7 +54,8 @@ from compute.axon import ComputeSubnetSubtensor
 from compute.protocol import Allocate
 from compute.pubsub import PubSubClient
 from compute.utils.db import ComputeDb
-from compute.utils.math import percent
+from compute.utils.ed25519 import generate_ssh_keypair, get_ssh_public_key
+from compute.utils.math import percent, force_to_float_or_default
 from compute.utils.parser import ComputeArgPaser
 from compute.utils.subtensor import is_registered, get_current_block, calculate_next_block_time
 from compute.utils.version import try_update, get_local_version, version2number, get_remote_version
@@ -231,6 +232,10 @@ class Validator:
         # Init the thread.
         self.lock = threading.Lock()
         self.threads: List[threading.Thread] = []
+
+        # Generate ephemeral access key
+        self.ssh_private_key = generate_ssh_keypair()
+        self.ssh_public_key = get_ssh_public_key(self.ssh_private_key)
 
     @staticmethod
     def init_config():
@@ -932,7 +937,7 @@ class Validator:
 
             # Step 1: Allocate Miner
             private_key, public_key = rsa.generate_key_pair()
-            allocation_response = await self.allocate_miner(axon, private_key, public_key)
+            allocation_response = await self.allocate_miner(axon, private_key, public_key, self.ssh_public_key)
             if not allocation_response:
                 bt.logging.trace(f"🌀 {hotkey}: Busy or not allocatable.")
                 return (hotkey, None, 0)
@@ -944,15 +949,16 @@ class Validator:
             # Step 2: Connect via SSH
             ssh_client = paramiko.SSHClient()
             ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            bt.logging.trace(f"{hotkey}: Connect to Miner via SSH.")
+            bt.logging.debug(f"{hotkey}: Connect to Miner via SSH.")
             ssh_client.connect(
                 host,
-                port=miner_info.get('port', 22),
-                username=miner_info['username'],
-                password=miner_info['password'],
+                port=miner_info.get('port', 4444),
+                username=miner_info.get('username', 'root'),
+                pkey=self.ssh_private_key,
                 timeout=10,
             )
             if not (ssh_client):
+                # FIXME: I'm suspicious about this check, I don't think it actually works
                 ssh_client.close()
                 bt.logging.trace(f"{hotkey}: SSH connection failed.")
                 return (hotkey, None, -1)
@@ -1208,6 +1214,7 @@ class Validator:
         axon: bt.AxonInfo,
         private_key: str,
         public_key: str,
+        ssh_public_key: str,
     ) -> dict | None:
         """
         Ask the allocator on ``axon`` for one container and return SSH creds.
@@ -1225,6 +1232,7 @@ class Validator:
         }
         docker_requirement = {
             "base_image": "pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime",
+            "ssh_key": ssh_public_key,
         }
 
         MAX_TRIES      = 5
