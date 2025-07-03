@@ -58,8 +58,8 @@ from neurons.Miner.allocate import (
     check_if_allocated,
 )
 from neurons.Miner.container import (
-    build_check_container,
-    build_sample_container,
+    ##build_check_container,
+    pull_sample_container,
     check_container,
     kill_container,
     restart_container,
@@ -152,11 +152,11 @@ class Miner:
         self._metagraph = self.subtensor.metagraph(self.config.netuid)
         bt.logging.info(f"Metagraph: {self.metagraph}")
 
-        build_check_container("my-compute-subnet", "sn27-check-container")
+        ##build_check_container("my-compute-subnet", "sn27-check-container")
         has_docker, msg = check_docker_availability()
 
         # Build sample container image to speed up the allocation process
-        sample_docker = multiprocessing.Process(target=build_sample_container)
+        sample_docker = multiprocessing.Process(target=pull_sample_container)
         sample_docker.start()
 
         if not has_docker:
@@ -189,6 +189,7 @@ class Miner:
         self.allocate_action = False
 
     def __check_alloaction_errors(self):
+        # kill running containers when they are not supposed to run
         file_path = "allocation_key"
         allocation_key_encoded = None
         valid_validator_hotkeys = self.get_valid_validator_hotkeys()
@@ -205,6 +206,7 @@ class Miner:
                 not self.allocation_status
                 and allocation_key_encoded
             ):
+                # wandb says not allocated but leftovers found, let's deallocate
                 # Decode the base64-encoded public key from the file
                 public_key = base64.b64decode(allocation_key_encoded).decode("utf-8")
                 deregister_allocation(public_key)
@@ -214,8 +216,9 @@ class Miner:
                 )
 
             if check_container() and not allocation_key_encoded:
+                # no allocation key yet running container, let's remove it
                 try:
-                    kill_container()
+                    kill_container(public_key='')
                 except Exception as e:
                     bt.logging.info(f"Error killing container: {e}")
 
@@ -427,7 +430,7 @@ class Miner:
         docker_action = synapse.docker_action
 
         if checking is True:
-            if timeline > 0:
+            if timeline > 0:  # positive means allocate, negative means deallocate (FIXME: this is weird)
                 result = check_allocation(timeline, device_requirement)
                 synapse.output = result
             else:
@@ -460,9 +463,19 @@ class Miner:
                 else:
                     bt.logging.info(f"Unknown action: {docker_action['action']}")
             else:
+                # actual allocation
+                if self.allocation_status:
+                    # refuse if already alcoacted
+                    bt.logging.error("Not possible to allocate. Already allocated.")
+                    synapse.output = make_error_response(
+                        "Already allocated, sorry.",
+                        status=False,
+                    )
+                    return synapse
+
                 public_key = synapse.public_key
                 if timeline > 0:
-                    if self.allocate_action == False:
+                    if self.allocate_action == False:  # FIXME: this is not a very reliable lock
                         self.allocate_action = True
                         # stop_server(self.miner_http_server)
                         result = register_allocation(timeline, device_requirement, public_key, docker_requirement)

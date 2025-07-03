@@ -71,14 +71,16 @@ class Allocate(bt.Synapse):
     - output: Respond of miner.
     """
 
-    timeline: int = 0
+    timeline: int = 0  # FIXME: this thing is weird
     device_requirement: dict = {}
     checking: bool = True
     output: dict = {}
     public_key: str = ""
     docker_requirement: dict = {
-        "image": "",
-        # TODO: env and storage
+        "image": "ivanneural/sn27-direct-ssh:pytorch-2.7.1-cuda12.8-latest",  # FIXME: temporary defaults
+        "env": {},
+        "internal_ports": {'ssh': 22},
+        # FIXME: old deprecated stuff below
         "base_image": "ubuntu",
         "ssh_key": "",
         "ssh_port": 4444,

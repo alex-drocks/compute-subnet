@@ -22,14 +22,16 @@ import os
 from io import BytesIO
 
 from compute.utils.exceptions import make_error_response
-from neurons.Miner.container import kill_container, run_container, check_container
+from neurons.Miner.container import kill_container, run_container, check_container, check_allocation_key
 from neurons.Miner.schedule import start
 
 
 # Register for given timeline and device_requirement
 def register_allocation(timeline, device_requirement, public_key, docker_requirement: dict):
+    # assuming allocation_status was checked before calling this
+    # (it can still misfire sometimes when wandb is out of sync)
     try:
-        kill_container()
+        kill_container()  # this only kills test contaienr this way, no dereg mode
 
         # Extract requirements from device_requirement and format them
         cpu_count = device_requirement["cpu"]["count"]  # e.g 2
@@ -54,8 +56,8 @@ def register_allocation(timeline, device_requirement, public_key, docker_require
         if run_status["status"]:
             bt.logging.info("Successfully allocated container.")
 
-        # Kill container when it meets timeline
-        start(timeline)
+        # Kill container when it meets timeline (FIXME I don't think we actually do that)
+        # start(timeline)
         return run_status
 
     # TODO: catch other exceptions here?
@@ -76,35 +78,17 @@ def register_allocation(timeline, device_requirement, public_key, docker_require
 def deregister_allocation(public_key):
     try:
         file_path = 'allocation_key'
-        # Open the file in read mode ('r') and read the data
-        with open(file_path, 'r') as file:
-            allocation_key_encoded = file.read()
+        result = kill_container(public_key=public_key)
 
-        # Decode the base64-encoded public key from the file
-        allocation_key = base64.b64decode(allocation_key_encoded).decode('utf-8')
+        if result["status"]:
+            # Remove the key from the file after successful deallocation
+            with open(file_path, 'w') as file:
+                file.truncate(0)  # Clear the file
 
-        # Kill container when the request is valid
-        if allocation_key.strip() == public_key.strip():
-            try:
-                kill_container(deregister=True)
-                # Remove the key from the file after successful deallocation
-                with open(file_path, 'w') as file:
-                    file.truncate(0)  # Clear the file
-
-                bt.logging.info("Successfully de-allocated container.")
-                return {"status": True}
-            except Exception as e:
-                return make_error_response(
-                    "kill_container failed.",
-                    status=False,
-                    exception=e,
-                )
+            bt.logging.info("Successfully de-allocated container.")
+            return {"status": True}
         else:
-            return make_error_response(
-                "Permission denied for de-allocation.",
-                status=False,
-            )
-
+            return result
     except Exception as e:
         return make_error_response(
             f"Error de-allocating container {e}",
@@ -118,39 +102,28 @@ def check_allocation(timeline, device_requirement):
     if check_container() is True:
         return {"status": False}
     # Check if there is enough device
-    # TODO: if we are downloading a new image here we should probably do it here (but we don't pass docker reqs to this)
+    # TODO: if we are downloading a new image we should probably start it here (but we don't pass docker reqs to this)
     return {"status": True}
 
 
 def check_if_allocated(public_key):
+    if not (key_check_result := check_allocation_key(public_key)).get("status"):
+        return key_check_result
+
     try:
-        file_path = 'allocation_key'
-        # Check if the file exists
-        if not os.path.exists(file_path):
-            return {"status": False}
-
-        # Open the file in read mode ('r') and read the data
-        with open(file_path, 'r') as file:
-            allocation_key_encoded = file.read()
-
-        # Check if the key is empty
-        if not allocation_key_encoded.strip():
-            return {"status": False}
-
-        # Decode the base64-encoded public key from the file
-        allocation_key = base64.b64decode(allocation_key_encoded).decode('utf-8')
-
-        # Compare the decoded key with the public key
-        if allocation_key.strip() != public_key.strip():
-            return {"status": False}
-
         # Check if the container is running
         if not check_container():
-            return {"status": False}
+            return make_error_response(
+                "Container is not running.",
+                status=False,
+            )
 
         # All checks passed, return True
         return {"status": True}
     except Exception as e:
-        # Handle any exceptions that occur
-        # Log the exception or handle it as needed
-        return {"status": False}
+        bt.logging.error("Container check error: {e}")
+        return make_error_response(
+            "Container check error: {e}",
+            status=False,
+            exception=e,
+        )

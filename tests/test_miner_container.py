@@ -1,6 +1,7 @@
 import base64
 import pytest
 from unittest import mock
+from pprint import pprint
 
 from neurons.Miner.container import (
     run_container,
@@ -9,7 +10,6 @@ from neurons.Miner.container import (
     unpause_container,
     get_docker,
     kill_container,
-    set_docker_base_size
 )
 
 # --- Autouse Fixture to Patch Module-Level Container Names ---
@@ -20,8 +20,8 @@ def patch_container_names(monkeypatch):
     This helps the functions under test to correctly match container names.
     """
     from neurons.Miner import container as cnt
-    monkeypatch.setattr(cnt, "container_name", "container")
-    monkeypatch.setattr(cnt, "container_name_test", "test_container")
+    monkeypatch.setattr(cnt, "PROD_CONTAINER_NAME", "container")
+    monkeypatch.setattr(cnt, "TEST_CONTAINER_NAME", "test_container")
 
 
 # --- Dummy Virtual Memory for psutil ---
@@ -50,6 +50,33 @@ def mock_retrieve_allocation_key(allocation_key_fixture):
 
 
 @pytest.fixture
+def mock_check_allocation_key(allocation_key_fixture):
+    mock_check = mock.MagicMock(return_value={"status": True})
+    patcher = mock.patch('neurons.Miner.container.check_allocation_key', mock_check)
+
+    patcher.start()
+
+    yield
+
+    patcher.stop()
+
+
+@pytest.fixture
+def mock_check_allocation_key_fail(allocation_key_fixture):
+    mock_check = mock.MagicMock(return_value={
+        "status": False,
+        "message": "Permission denied (allocation key mismatch).",
+    })
+    patcher = mock.patch('neurons.Miner.container.check_allocation_key', mock_check)
+
+    patcher.start()
+
+    yield
+
+    patcher.stop()
+
+
+@pytest.fixture
 def mock_containers():
     return []
 
@@ -58,6 +85,18 @@ def mock_containers():
 def docker_client():
     return mock.MagicMock()
 
+@pytest.fixture
+def mock_get_container(mock_containers, docker_client):
+    def get_c(name):
+        for c in mock_containers:
+            if c.name == name:
+                return c
+
+    patcher = mock.patch('neurons.Miner.container.get_container', get_c)
+
+    yield patcher.start()
+
+    patcher.stop()
 
 @pytest.fixture
 def mock_get_docker(mock_containers, docker_client):
@@ -146,31 +185,35 @@ def mock_open_fn():
 
 @pytest.fixture
 def mock_container_build(monkeypatch):
-    patcher1 = mock.patch('os.makedirs')
+    # we are not building anymore we can remove half of this
+    #patcher1 = mock.patch('os.makedirs')
     patcher3 = mock.patch('neurons.Miner.container.rsa.encrypt_data', return_value=b"encrypted_data")
     patcher4 = mock.patch('neurons.Miner.container.psutil.virtual_memory', return_value=DummyVirtualMemory())
-    patcher5 = mock.patch('neurons.Miner.container.build_sample_container')
+    #patcher5 = mock.patch('neurons.Miner.container.build_sample_container')
     patcher6 = mock.patch('neurons.Miner.container.password_generator', return_value="testpwd")
+    patcher7 = mock.patch('neurons.Miner.container.exec_update_container_key')
 
     # Set module-level globals required by run_container.
     from neurons.Miner import container as cnt
-    monkeypatch.setattr(cnt, "image_name_base", "dummy_base")
-    monkeypatch.setattr(cnt, "image_name", "dummy_image")
+    #monkeypatch.setattr(cnt, "image_name_base", "dummy_base")
+    #monkeypatch.setattr(cnt, "image_name", "dummy_image")
     monkeypatch.setattr(cnt, "__version_as_int__", 1)
 
-    patcher1.start()
+    #patcher1.start()
     patcher3.start()
     patcher4.start()
-    patcher5.start()
+    #patcher5.start()
     patcher6.start()
+    patcher7.start()
 
     yield
 
+    patcher7.stop()
     patcher6.stop()
-    patcher5.stop()
+    #patcher5.stop()
     patcher4.stop()
     patcher3.stop()
-    patcher1.stop()
+    #patcher1.stop()
 
 
 
@@ -209,7 +252,7 @@ class TestRunContainer:
         # Call run_container
         result = run_container(cpu_usage, ram_usage, hard_disk_usage, gpu_usage,
                                public_key, docker_requirement, testing)
-
+        pprint(result)
         # Verify that the image was built and container was run.
         ##XXX#docker_client.images.build.assert_called_once()
         docker_client.containers.run.assert_called_once()
@@ -351,75 +394,64 @@ class TestRunContainer:
 
 
 class TestCheckContainer:
-    def test_check_container_running(self, mock_get_docker, running_container):
+    def test_check_container_running(self, mock_get_container, running_container):
         """
         check_container:
         Returns True when a regular container (with name "container") is running.
         """
         assert check_container() is True
 
-    def test_check_container_test_running(self, mock_get_docker, running_test_container):
+    def test_check_container_test_running(self, mock_get_container, running_test_container):
         """
         check_container:
         Returns True when a test container (with name "test_container") is running.
         """
         assert check_container() is True
 
-    def test_check_container_not_running(self, mock_get_docker, other_container):
+    def test_check_container_not_running(self, mock_get_container, other_container):
         """
         check_container:
         Returns False when the container name does not match the expected value.
         """
         assert check_container() is False
 
-    def test_check_container_exception(self, mock_get_docker):
+    def test_check_container_exception(self, mock_get_container):
         """
         check_container:
         Returns False when an exception is raised during Docker access.
         """
-        mock_get_docker.side_effect = Exception("Test error")
+        mock_get_container.side_effect = Exception("Test error")
 
         assert check_container() is False
 
 
 class TestPauseContainer:
-    def test_pause_container_success(self, mock_get_docker, mock_retrieve_allocation_key, allocation_key_fixture, running_container):
+    def test_pause_container_success(self, mock_get_container, mock_check_allocation_key, running_container):
         """
         pause_container:
         Pauses the container when the allocation key is valid.
         """
         result = pause_container(allocation_key_fixture)
+        pprint(result)
 
         running_container.pause.assert_called_once()
         assert result
         assert result["status"] is True
         assert result["message"]
 
-    def test_pause_container_no_allocation_key(self, mock_get_docker, mock_retrieve_allocation_key, running_container):
-        """
-        pause_container:
-        Returns False if no allocation key is retrieved.
-        """
-        mock_retrieve_allocation_key.return_value = None
-
-        result = pause_container("test_public_key")
-
-        assert result
-        assert result["status"] is False
-        assert result["message"] == "Failed to retrieve allocation key."
-
-    def test_pause_container_key_mismatch(self, mock_get_docker, mock_retrieve_allocation_key):
+    def test_pause_container_key_mismatch(self, mock_check_allocation_key_fail):
         """
         pause_container:
         Returns False when the provided allocation key does not match.
         """
         result = pause_container("invalid_key")
+        pprint(result)
 
         assert result
         assert result["status"] is False
-        assert result["message"] == "Permission denied."
+        assert result["message"] == "Permission denied (allocation key mismatch)."
 
-    def test_pause_container_not_found(self, mock_retrieve_allocation_key, allocation_key_fixture, mock_get_docker, running_container):
+    def test_pause_container_not_found(self, mock_check_allocation_key, mock_get_container, running_container):
         """
         pause_container:
         Returns False when no container with the expected name is found.
@@ -431,7 +463,7 @@ class TestPauseContainer:
         assert result["status"] is False
         assert result["message"] == "Unable to find container"
 
-    def test_pause_container_exception(self, mock_retrieve_allocation_key, mock_get_docker, allocation_key_fixture, running_container):
+    def test_pause_container_exception(self, mock_check_allocation_key, mock_get_container, running_container):
         """
         pause_container:
         Returns False when an exception occurs in get_docker.
@@ -450,7 +482,7 @@ class TestPauseContainer:
 
 
 class TestUnpauseContainer:
-    def test_unpause_container_success(self, mock_retrieve_allocation_key, mock_get_docker, allocation_key_fixture, running_container):
+    def test_unpause_container_success(self, mock_check_allocation_key, mock_get_container, running_container):
         """
         unpause_container:
         Unpauses the container when the allocation key is valid.
@@ -463,20 +495,7 @@ class TestUnpauseContainer:
         assert result["status"] is True
         assert result["message"]
 
-    def test_unpause_container_no_allocation_key(self, mock_get_docker, mock_retrieve_allocation_key, running_container):
-        """
-        unpause_container:
-        Returns False if no allocation key is retrieved.
-        """
-        mock_retrieve_allocation_key.return_value = None
-
-        result = unpause_container("test_public_key")
-
-        assert result
-        assert result["status"] is False
-        assert result["message"] == "Failed to retrieve allocation key."
-
-    def test_unpause_container_key_mismatch(self, mock_get_docker, mock_retrieve_allocation_key, allocation_key_fixture):
+    def test_unpause_container_key_mismatch(self, mock_get_container, mock_check_allocation_key_fail):
         """
         unpause_container:
         Returns False when the provided allocation key does not match.
@@ -485,9 +504,9 @@ class TestUnpauseContainer:
 
         assert result
         assert result["status"] is False
-        assert result["message"] == "Permission denied."
+        assert result["message"] == "Permission denied (allocation key mismatch)."
 
-    def test_unpause_container_not_found(self, mock_retrieve_allocation_key, mock_get_docker, allocation_key_fixture, running_container):
+    def test_unpause_container_not_found(self, mock_check_allocation_key, mock_get_container, running_container):
         """
         unpause_container:
         Returns False when no container with the expected name is found.
@@ -500,7 +519,7 @@ class TestUnpauseContainer:
         assert result["status"] is False
         assert result["message"] == "Unable to find container"
 
-    def test_unpause_container_exception(self, mock_retrieve_allocation_key, mock_get_docker, allocation_key_fixture, running_container):
+    def test_unpause_container_exception(self, mock_check_allocation_key, mock_get_container, running_container):
         """
         unpause_container:
         Returns False when an exception occurs in get_docker.
@@ -552,13 +571,13 @@ class TestGetDocker:
 
 
 class TestKillContainer:
-    def test_kill_container_test_running(self, mock_get_docker, running_test_container, docker_client):
+    def test_kill_container_test_running(self, mock_get_container, mock_get_docker, running_test_container, docker_client, allocation_key_fixture, mock_check_allocation_key):
         """
         kill_container:
         Kills a running test container.
         """
 
-        kill_container(True)
+        kill_container(public_key=allocation_key_fixture)
 
         running_test_container.exec_run.assert_called_once_with(cmd="kill -15 1")
         running_test_container.wait.assert_called_once()
@@ -566,27 +585,27 @@ class TestKillContainer:
         docker_client.images.prune.assert_called_once_with(filters={"dangling": True})
 
     #@mock.patch('neurons.Miner.container.get_docker')
-    def test_kill_container_test_not_running(self, mock_get_docker, docker_client, running_test_container):
+    def test_kill_container_test_not_running(self, mock_get_container, mock_get_docker, docker_client, running_test_container, allocation_key_fixture, mock_check_allocation_key):
         """
         kill_container:
         Removes a test container that is not running.
         """
         running_test_container.status = "exited"
 
-        kill_container(True)
+        kill_container(public_key=allocation_key_fixture)
 
         running_test_container.exec_run.assert_not_called()
         running_test_container.wait.assert_not_called()
         running_test_container.remove.assert_called_once()
         docker_client.images.prune.assert_called_once_with(filters={"dangling": True})
 
-    def test_kill_container_regular_running(self, mock_get_docker, docker_client, running_container):
+    def test_kill_container_regular_running(self, mock_get_container, mock_get_docker, docker_client, running_container, allocation_key_fixture, mock_check_allocation_key):
         """
         kill_container:
         Kills a running regular container.
         """
 
-        kill_container(True)
+        kill_container(public_key=allocation_key_fixture)
 
         running_container.exec_run.assert_called_once_with(cmd="kill -15 1")
         running_container.wait.assert_called_once()
@@ -594,26 +613,26 @@ class TestKillContainer:
         docker_client.images.prune.assert_called_once_with(filters={"dangling": True})
 
     #@mock.patch('neurons.Miner.container.get_docker')
-    def test_kill_container_regular_not_running(self, mock_get_docker, docker_client, exited_container):
+    def test_kill_container_regular_not_running(self, mock_get_container, mock_get_docker, docker_client, exited_container, allocation_key_fixture, mock_check_allocation_key):
         """
         kill_container:
         Removes a regular container that is not running.
         """
 
-        kill_container(True)
+        kill_container(public_key=allocation_key_fixture)
 
         exited_container.exec_run.assert_not_called()
         exited_container.wait.assert_not_called()
         exited_container.remove.assert_called_once()
         docker_client.images.prune.assert_called_once_with(filters={"dangling": True})
 
-    def test_kill_container_deregister_false(self, mock_get_docker, docker_client, running_container, running_test_container):
+    def test_kill_container_deregister_false(self, mock_get_container, mock_get_docker, docker_client, running_container, running_test_container):
         """
         kill_container:
         When deregister=False, only looks for and removes the test container.
         """
 
-        kill_container(deregister=False)
+        kill_container(public_key=None)
 
         running_test_container.exec_run.assert_called_once_with(cmd="kill -15 1")
         running_test_container.wait.assert_called_once()
@@ -623,13 +642,13 @@ class TestKillContainer:
         running_container.remove.assert_not_called()
         docker_client.images.prune.assert_called_once_with(filters={"dangling": True})
 
-    def test_kill_container_deregister_true_with_both_containers(self, mock_get_docker, docker_client, running_container, running_test_container):
+    def test_kill_container_deregister_true_with_both_containers(self, mock_get_container, mock_get_docker, docker_client, running_container, running_test_container, allocation_key_fixture, mock_check_allocation_key):
         """
         kill_container:
         When deregister=True, looks for and removes both test and regular containers.
         """
 
-        kill_container(deregister=True)
+        kill_container(public_key=allocation_key_fixture)
 
         running_test_container.exec_run.assert_called_once_with(cmd="kill -15 1")
         running_test_container.wait.assert_called_once()
@@ -639,20 +658,19 @@ class TestKillContainer:
         running_container.remove.assert_called_once()
         docker_client.images.prune.assert_called_once_with(filters={"dangling": True})
 
-    def test_kill_container_not_found(self, mock_get_docker, docker_client, other_container):
+    def test_kill_container_not_found(self, mock_get_container, mock_get_docker, docker_client, other_container, allocation_key_fixture, mock_check_allocation_key):
         """
         kill_container:
         Does nothing if no matching container is found.
         """
 
-        kill_container(True)
+        kill_container(public_key=allocation_key_fixture)
 
         other_container.exec_run.assert_not_called()
         other_container.wait.assert_not_called()
         other_container.remove.assert_not_called()
-        docker_client.images.prune.assert_called_once_with(filters={"dangling": True})
 
-    def test_kill_container_exception(self, mock_get_docker, running_test_container):
+    def test_kill_container_exception(self, mock_get_container, mock_get_docker, running_test_container, allocation_key_fixture, mock_check_allocation_key):
         """
         kill_container:
         Returns False when get_docker raises an exception.
@@ -660,32 +678,4 @@ class TestKillContainer:
         running_test_container.remove.side_effect = Exception("Test error")
 
         with pytest.raises(Exception):
-            kill_container(True)
-
-
-class TestSetDockerBaseSize:
-    def test_set_docker_base_size(self, mock_open_fn):
-        """
-        set_docker_base_size:
-        Verifies that the function writes the correct JSON content to /etc/docker/daemon.json
-        and calls subprocess.run to restart Docker.
-        """
-        mock_json_dump = mock.MagicMock()
-        mock_subprocess_run = mock.MagicMock()
-        patcher1 = mock.patch('subprocess.run', mock_subprocess_run).start()
-        patcher2 = mock.patch('json.dump', mock_json_dump).start()
-        base_size = "100g"
-        expected_file = "/etc/docker/daemon.json"
-        expected_dict = {
-            "storage-driver": "devicemapper",
-            "storage-opts": ["dm.basesize=" + base_size]
-        }
-
-        set_docker_base_size(base_size)
-
-        mock_open_fn.assert_called_once_with(expected_file, "w")
-        with mock_open_fn() as file_handle:
-            mock_json_dump.assert_called_once_with(expected_dict, file_handle, indent=4)
-        mock_subprocess_run.assert_called_once_with(["systemctl", "restart", "docker"])
-        patcher2.stop()
-        patcher1.stop()
+            kill_container(public_key=allocation_key_fixture)
