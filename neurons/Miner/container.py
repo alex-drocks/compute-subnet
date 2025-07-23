@@ -403,7 +403,7 @@ def exec_update_container_key(container, new_ssh_key: str, key_type: str = "user
         raise RuntimeError(f"Failed to read existing ssh key: {exist_key}")
 
     exist_key = exist_key.decode("utf-8").split("\n")
-    user_key = exist_key[0]
+    user_key = exist_key[0] or ""
     terminal_key = ""
     if len(exist_key) > 1:
         terminal_key = exist_key[1]
@@ -413,7 +413,7 @@ def exec_update_container_key(container, new_ssh_key: str, key_type: str = "user
         user_key = new_ssh_key
     else:
         assert False, "Unknown key type"
-    key_list = user_key + "\n" + terminal_key
+    key_list = '\n'.join([user_key or "", terminal_key or ""])
     # bt.logging.debug(f"New SSH key: {key_list}")
     container.exec_run(cmd=f"bash -c \"echo '{key_list}' > /root/.ssh/authorized_keys && sync\"")
 
