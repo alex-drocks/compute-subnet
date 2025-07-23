@@ -458,10 +458,10 @@ def pull_image(image: str = ''):
     name, tag = image.split(':', 1)
     api_client = docker.APIClient()
     try:
-        image_obj = api_client.pull(name, tag=tag)
-        message = f"Container image {image}/{image_obj.short_id} pulled successfully"
+        result = api_client.pull(name, tag=tag)
+        message = f"Container image {image} pulled successfully {result}"
         bt.logging.info(message)
-        return {"status": True, "image_id": image_obj.id, "message": message}
+        return {"status": True, "message": message}
     except docker.errors.APIError as e:
         return make_error_response(
             "Pull image failed with exception",
