@@ -402,7 +402,7 @@ def exec_update_container_key(container, new_ssh_key: str, key_type: str = "user
     if exit_code != 0:
         raise RuntimeError(f"Failed to read existing ssh key: {exist_key}")
 
-    exist_key = exist_key.output.decode("utf-8").split("\n")
+    exist_key = exist_key.decode("utf-8").split("\n")
     user_key = exist_key[0]
     terminal_key = ""
     if len(exist_key) > 1:
