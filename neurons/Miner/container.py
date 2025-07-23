@@ -423,9 +423,32 @@ def exec_update_container_key(container, new_ssh_key: str, key_type: str = "user
         container.exec_run(cmd=f"bash -c \"echo 'root:!' | chpasswd -e\"")
 
 
-def pull_sample_container():
+def pull_default_image():
     api_client = docker.APIClient()
     api_client.pull('ivanneural/sn27-direct-ssh', tag='pytorch-2.7.1-cuda12.8-latest')
+
+
+def create_check_container(name="sn27-check-container"):
+    try:
+        client = docker.from_env()
+
+        # Create the container from the built image
+        container = client.containers.create('ivanneural/sn27-direct-ssh:pytorch-2.7.1-cuda12.8-latest', name=name, command='echo compute-subnet')
+        bt.logging.trace(f"Container '{container_name}' created successfully.")
+        return container
+
+    except docker.errors.APIError as e:
+        pass
+    except Exception as e:
+        bt.logging.error(
+            "Insufficient permissions to execute Docker commands. Please ensure the current user is added to the 'docker' group "
+            "and has the necessary privileges. Run 'sudo usermod -aG docker $USER' and restart your session."
+        )
+    finally:
+        try:
+            client.close()
+        except Exception as close_error:
+            bt.logging.warning(f"Error closing the Docker client: {close_error}")
 
 
 def pull_image(image: str = ''):

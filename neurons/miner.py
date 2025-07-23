@@ -58,8 +58,8 @@ from neurons.Miner.allocate import (
     check_if_allocated,
 )
 from neurons.Miner.container import (
-    ##build_check_container,
-    pull_sample_container,
+    create_check_container,
+    pull_default_image,
     check_container,
     kill_container,
     restart_container,
@@ -153,12 +153,10 @@ class Miner:
         self._metagraph = self.subtensor.metagraph(self.config.netuid)
         bt.logging.info(f"Metagraph: {self.metagraph}")
 
-        ##build_check_container("my-compute-subnet", "sn27-check-container")
-        has_docker, msg = check_docker_availability()
-
         # Build sample container image to speed up the allocation process
-        sample_docker = multiprocessing.Process(target=pull_sample_container)
-        sample_docker.start()
+        pull_default_image()
+        create_check_container()
+        has_docker, msg = check_docker_availability()
 
         if not has_docker:
             bt.logging.error(msg)
