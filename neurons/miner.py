@@ -66,6 +66,7 @@ from neurons.Miner.container import (
     exchange_key_container,
     pause_container,
     unpause_container,
+    pull_image,
 )
 from compute.wandb.wandb import ComputeWandb
 from neurons.Miner.allocate import check_allocation, register_allocation
@@ -438,6 +439,11 @@ class Miner:
                 result = check_if_allocated(public_key=public_key)
                 synapse.output = result
         else:
+            if docker_action["action"] == "pull":
+                # pull image here
+                result = pull_image(docker_requirement.get("image"))
+                synapse.output = result
+                return synapse
             if docker_change is True:
                 if docker_action["action"] == "exchange_key":
                     public_key = synapse.public_key
