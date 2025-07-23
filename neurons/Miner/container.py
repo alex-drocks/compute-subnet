@@ -75,7 +75,7 @@ def get_container(name: str):
 # Kill the currently running container
 def kill_container(public_key: str | None = None):
     if public_key is not None and (key_check_result := check_allocation_key(public_key)).get("status"):
-        # dereg mode is the only one killing prod container
+        # "dereg mode" is the only one killing prod container
         if running_container := get_container(PROD_CONTAINER_NAME):
             if running_container.status == "running":
                 running_container.exec_run(cmd="kill -15 1")
@@ -119,30 +119,15 @@ def run_container(cpu_usage, ram_usage, hard_disk_usage, gpu_usage, public_key, 
         docker_image = docker_requirement.get("image") or 'ivanneural/sn27-direct-ssh:pytorch-2.7.1-cuda12.8-latest'
         docker_env = docker_requirement.get("env", {})
         docker_env["NVIDIA_VISIBLE_DEVICES"] = "all"  # will need adjustment for fractional allcoations
-        docker_internal_ports = docker_requirement.get("internal_ports", {"ssh": 22})
-        external_user_port = docker_requirement.get("fixed_external_user_port")
-        # ^^ these ports are set by template, not changeable easily, not known by miner prior to request
-
-        # TODO: this needs int(self.config.ssh.port) but we don't pass miner config here
-        # TODO: + the equivalent for "external" port once that's merged
-        external_ports = {
-            "ssh": 4444,
-            "external": external_user_port or 27015,
-        }
-        # ^^ these are supposed to be configurable by miner, not known to anyone else prior to request
-
+        docker_internal_ports = docker_requirement.get("internal_ports", {"ssh": 22, "external": 27015})
+        docker_external_ports = docker_requirement.get("external_ports", {"ssh": 4444, "external": 27015})
         # now let's map the two dict onto each other e.g. {22: 4444}
         ports_mapping = {
-            v: external_ports[k]
+            v: docker_external_ports[k]
             for k, v in docker_internal_ports.items()
+            if k in docker_external_ports
         }
-
-        # old ways, to be removed soon
-        docker_volume = docker_requirement.get("volume_path")
         docker_ssh_key = docker_requirement.get("ssh_key")
-        docker_ssh_port = docker_requirement.get("ssh_port")
-        docker_appendix = docker_requirement.get("dockerfile")
-        # ^^ XXX these are all deprecated
 
         if docker_image:
             image_tag = docker_image
@@ -152,8 +137,7 @@ def run_container(cpu_usage, ram_usage, hard_disk_usage, gpu_usage, public_key, 
         shm_size_gb = int(0.9 * available_memory / (1024**3))  # Convert to GB
         bt.logging.trace(f"Allocating {shm_size_gb}GB to /dev/shm")
 
-        # Determine container name based on ssh key
-        # (no, not on ssh key)
+        # Determine container name based on parameters (we might wanna stop doing this)
         container_to_run = TEST_CONTAINER_NAME if testing else PROD_CONTAINER_NAME
 
         # Step 2: Run the Docker container
@@ -184,7 +168,13 @@ def run_container(cpu_usage, ram_usage, hard_disk_usage, gpu_usage, public_key, 
             exec_update_container_key(container, new_ssh_key=docker_ssh_key, key_type="user", password=password)
             bt.logging.info("Container ssh key set.")
 
-            info = {"username": "root", "password": password, "port": docker_ssh_port, "fixed_external_user_port": external_user_port, "version" : __version_as_int__}
+            info = {
+                    "username": "root",
+                    "password": password,
+                    "port": docker_external_ports["ssh"],
+                    "fixed_external_user_port": docker_external_ports.get("external"),
+                    "version": __version_as_int__
+            }
             info_str = json.dumps(info)
             public_key = public_key.encode("utf-8")
             encrypted_info = rsa.encrypt_data(public_key, info_str)

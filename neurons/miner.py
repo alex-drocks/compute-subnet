@@ -425,8 +425,10 @@ class Miner:
         device_requirement = synapse.device_requirement
         checking = synapse.checking
         docker_requirement = synapse.docker_requirement
-        docker_requirement["ssh_port"] = int(self.config.ssh.port)
-        docker_requirement["fixed_external_user_port"] = int(self.config.external.fixed_port)
+        docker_requirement["external_ports"] = {
+            "ssh": int(self.config.ssh.port),
+            "external": int(self.config.external.fixed_port),
+        }
         docker_change = synapse.docker_change
         docker_action = synapse.docker_action
 
@@ -472,6 +474,7 @@ class Miner:
                 # actual allocation
                 if self.allocation_status:
                     # refuse if already alcoacted
+                    # TODO: it would be very cool to provide allocation uuid here but miner doesn't know
                     bt.logging.error("Not possible to allocate. Already allocated.")
                     synapse.output = make_error_response(
                         "Already allocated, sorry.",

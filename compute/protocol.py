@@ -77,16 +77,11 @@ class Allocate(bt.Synapse):
     output: dict = {}
     public_key: str = ""
     docker_requirement: dict = {
-        "image": "ivanneural/sn27-direct-ssh:pytorch-2.7.1-cuda12.8-latest",  # FIXME: temporary defaults
+        "image": "ivanneural/sn27-direct-ssh:pytorch-2.7.1-cuda12.8-latest",  # FIXME: temporary default
         "env": {},
-        "internal_ports": {'ssh': 22},
-        # FIXME: old deprecated stuff below
-        "base_image": "ubuntu",
+        "internal_ports": {"ssh": 22, "external": 27015},  # overridden by templates
+        "external_ports": {"ssh": 4444, "external": 27015},  # Default value to be overridden with settings
         "ssh_key": "",
-        "ssh_port": 4444,
-        "volume_path": "/tmp",
-        "dockerfile": "",
-        "fixed_external_user_port": 27015,  # Default value to be overridden with settings
     }
     docker_change: bool = False
     docker_action: dict = {
