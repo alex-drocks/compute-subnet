@@ -424,8 +424,8 @@ def exec_update_container_key(container, new_ssh_key: str, key_type: str = "user
 
 
 def pull_sample_container():
-    client, _ = get_docker()
-    client.pull('ivanneural/sn27-direct-ssh', tag='pytorch-2.7.1-cuda12.8-latest')
+    api_client = docker.APIClient()
+    api_client.pull('ivanneural/sn27-direct-ssh', tag='pytorch-2.7.1-cuda12.8-latest')
 
 
 def pull_image(image: str = ''):
@@ -433,9 +433,9 @@ def pull_image(image: str = ''):
         image = 'ivanneural/sn27-direct-ssh:pytorch-2.7.1-cuda12.8-latest'
         # TODO: replace ^^ with more appropriate default
     name, tag = image.split(':', 1)
-    client, _ = get_docker()
+    api_client = docker.APIClient()
     try:
-        image_obj = client.pull(name, tag=tag)
+        image_obj = api_client.pull(name, tag=tag)
         message = f"Container image {image}/{image_obj.short_id} pulled successfully"
         bt.logging.info(message)
         return {"status": True, "image_id": image_obj.id, "message": message}
