@@ -155,7 +155,7 @@ def run_container(cpu_usage, ram_usage, hard_disk_usage, gpu_usage, public_key, 
             device_requests=device_requests,
             environment=[f"{k}={v}" for k, v in docker_env.items()],
             ports=ports_mapping,
-            init=True,
+            init=False,
             shm_size=f"{shm_size_gb}g",  # Set the shared memory size to 2GB
             restart_policy={"Name": "on-failure", "MaximumRetryCount": 3},
             # volumes={ docker_volume: {'bind': '/root/workspace/', 'mode': 'rw'}},
@@ -372,11 +372,6 @@ def exchange_key_container(new_ssh_key: str, public_key: str, key_type: str = "u
         if running_container := get_container(PROD_CONTAINER_NAME):
             if running_container.status == "running":
                 exec_update_container_key(running_container, new_ssh_key=new_ssh_key, key_type=key_type)
-                running_container.exec_run(cmd="kill -15 1")
-                running_container.wait()
-                running_container.restart()
-                # FIXME ^^ I'm not entirely sure this restart doesn't defeat the whole purpose
-                # do we even need a restart? I'm guessing the idea is to drop old connections but I doubt it makes sense
             return {
                 "status": True,
                 "message": "Container key exchanged successfully."
