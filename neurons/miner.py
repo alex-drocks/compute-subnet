@@ -470,24 +470,16 @@ class Miner:
                     bt.logging.info(f"Unknown action: {docker_action['action']}")
             else:
                 # actual allocation
-                if self.allocation_status:
-                    # refuse if already alcoacted
-                    # TODO: it would be very cool to provide allocation uuid here but miner doesn't know
-                    bt.logging.error("Not possible to allocate. Already allocated.")
-                    synapse.output = make_error_response(
-                        "Already allocated, sorry.",
-                        status=False,
-                    )
-                    return synapse
-
                 public_key = synapse.public_key
                 if timeline > 0:
+                    # TODO: fail early if request shouldn't be served (e.g. already allocated)
                     if self.allocate_action == False:  # FIXME: this is not a very reliable lock
                         self.allocate_action = True
                         # stop_server(self.miner_http_server)
                         result = register_allocation(timeline, device_requirement, public_key, docker_requirement)
                         self.allocate_action = False
                         synapse.output = result
+                        synapse.output["port"] = int(self.config.ssh.port)
                     else:
                         synapse.output = make_error_response(
                             f"Allocation is already in progress. Please wait for the previous one to finish",
@@ -497,8 +489,7 @@ class Miner:
                     result = deregister_allocation(public_key)
                     # self.miner_http_server = start_server(self.config.ssh.port)
                     synapse.output = result
-        self.update_allocation(synapse)
-        synapse.output["port"] = int(self.config.ssh.port)
+                self.update_allocation(synapse)
         return synapse
 
     # The blacklist function decides if a request should be ignored.
