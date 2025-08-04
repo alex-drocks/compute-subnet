@@ -114,8 +114,8 @@ def run_container(cpu_usage, ram_usage, hard_disk_usage, gpu_usage, public_key, 
         # XXX ^^ here we take all the device requirements are ignore them completely
 
         # new template settings
-        # XXX default value is temporary for testing
-        # the value should be mandatory and checked against a whitelist
+        # TODO default image is temporary
+        # TODO the value should be made mandatory and checked against a whitelist
         docker_image = docker_requirement.get("image") or 'ivanneural/sn27-direct-ssh:pytorch-2.7.1-cuda12.8-latest'
         docker_env = docker_requirement.get("env", {})
         docker_env["NVIDIA_VISIBLE_DEVICES"] = "all"  # will need adjustment for fractional allcoations
@@ -128,9 +128,6 @@ def run_container(cpu_usage, ram_usage, hard_disk_usage, gpu_usage, public_key, 
             if k in docker_external_ports
         }
         docker_ssh_key = docker_requirement.get("ssh_key")
-
-        if docker_image:
-            image_tag = docker_image
 
         # Calculate 90% of free memory for shm_size
         available_memory = psutil.virtual_memory().available
@@ -149,7 +146,7 @@ def run_container(cpu_usage, ram_usage, hard_disk_usage, gpu_usage, public_key, 
         # if gpu_usage["capacity"] == 0:
         #    device_requests = []
         container = client.containers.run(
-            image=image_tag,
+            image=docker_image,
             name=container_to_run,
             detach=True,
             device_requests=device_requests,
@@ -453,7 +450,7 @@ def pull_image(image: str = ''):
     name, tag = image.split(':', 1)
     api_client = docker.APIClient()
     try:
-        result = api_client.pull(name, tag=tag)
+        result = api_client.pull(name, tag=tag, stream=True)
         message = f"Container image {image} pulled successfully {result}"
         bt.logging.info(message)
         return {"status": True, "message": message}
