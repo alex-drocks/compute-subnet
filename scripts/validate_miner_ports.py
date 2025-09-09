@@ -11,6 +11,7 @@ import time
 import threading
 import requests
 import json
+import logging
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Dict, Optional, Tuple
 
@@ -90,7 +91,8 @@ class PortValidator:
                     # Validate IP format
                     socket.inet_aton(ip)
                     return ip
-            except:
+            except Exception as e:
+                logging.warning(f"Failed to get public IP from {service}: {e}")
                 continue
         return None
 
@@ -120,7 +122,7 @@ class PortValidator:
                     return True, "Port is open"
                 else:
                     return False, "Port appears closed from internet"
-        except:
+        except Exception:
             pass
 
         # Method 2: Try direct connection test
@@ -156,7 +158,7 @@ class PortValidator:
             else:
                 results['firewall'] = 'ufw'
                 results['active'] = False
-        except:
+        except Exception:
             results['firewall'] = 'unknown'
             results['active'] = False
 
@@ -215,7 +217,7 @@ class PortValidator:
                 print("   You'll need to configure port forwarding on your router!")
             else:
                 print(f"✅ Direct connection detected (IP: {local_ip})")
-        except:
+        except Exception:
             print("⚠️  Could not determine network type")
 
         # Step 3: Check firewall
