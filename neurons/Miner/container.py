@@ -114,9 +114,8 @@ def run_container(cpu_usage, ram_usage, hard_disk_usage, gpu_usage, public_key, 
         # XXX ^^ here we take all the device requirements are ignore them completely
 
         # new template settings
-        # TODO default image is temporary
         # TODO the value should be made mandatory and checked against a whitelist
-        docker_image = docker_requirement.get("image") or 'ivanneural/sn27-direct-ssh:pytorch-2.7.1-cuda12.8-latest'
+        docker_image = docker_requirement.get("image") or "nirepo/default-pytorch:2.8.0-cuda12.8-cudnn9-runtime"
         docker_env = docker_requirement.get("env", {})
         docker_env["NVIDIA_VISIBLE_DEVICES"] = "all"  # will need adjustment for fractional allcoations
         docker_internal_ports = docker_requirement.get("internal_ports", {"ssh": 22, "external": 27015})
@@ -417,7 +416,7 @@ def exec_update_container_key(container, new_ssh_key: str, key_type: str = "user
 
 def pull_default_image():
     api_client = docker.APIClient()
-    api_client.pull('ivanneural/sn27-direct-ssh', tag='pytorch-2.7.1-cuda12.8-latest')
+    api_client.pull("nirepo/default-pytorch", tag="2.8.0-cuda12.8-cudnn9-runtime")
 
 
 def create_check_container(name="sn27-check-container"):
@@ -425,7 +424,7 @@ def create_check_container(name="sn27-check-container"):
         client = docker.from_env()
 
         # Create the container from the built image
-        container = client.containers.create('ivanneural/sn27-direct-ssh:pytorch-2.7.1-cuda12.8-latest', name=name, command='echo compute-subnet')
+        container = client.containers.create("nirepo/default-pytorch:2.8.0-cuda12.8-cudnn9-runtime", name=name, command="echo compute-subnet")
         bt.logging.trace(f"Container '{container_name}' created successfully.")
         return container
 
@@ -445,8 +444,7 @@ def create_check_container(name="sn27-check-container"):
 
 def pull_image(image: str = ''):
     if not image:
-        image = 'ivanneural/sn27-direct-ssh:pytorch-2.7.1-cuda12.8-latest'
-        # TODO: replace ^^ with more appropriate default
+        image = "nirepo/default-pytorch:2.8.0-cuda12.8-cudnn9-runtime"
     name, tag = image.split(':', 1)
     api_client = docker.APIClient()
     try:
