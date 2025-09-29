@@ -414,9 +414,39 @@ def exec_update_container_key(container, new_ssh_key: str, key_type: str = "user
         container.exec_run(cmd=f"bash -c \"echo 'root:!' | chpasswd -e\"")
 
 
+# Custom templates images for pre-pull (from register-api templates)
+CUSTOM_TEMPLATE_IMAGES = [
+    'ivanneural/sn27-direct-ssh:pytorch-2.7.1-cuda12.8-latest',  # Default image
+    'nirepo/default-pytorch:2.8.0-cuda12.8-cudnn9-runtime',     # default-ubuntu-pytorch
+    'nirepo/ollama-ssh:latest',                                   # ollama-ssh
+    'nirepo/comfyui-ssh:latest',                                 # comfyui-ssh
+    'nirepo/automatic1111-ssh:latest',                           # automatic1111-ssh
+    'nirepo/scientific-ssh:latest',                              # scientific-ssh
+    'nirepo/jupyter-scipy-ssh:latest',                           # jupyter-scipy-ssh
+    'nirepo/jupyter-spark-ssh:latest',                           # jupyter-spark-ssh
+    'nirepo/jupyter-tensorflow-ssh:latest',                      # jupyter-tensorflow-ssh
+]
+
 def pull_default_image():
     api_client = docker.APIClient()
     api_client.pull("nirepo/default-pytorch", tag="2.8.0-cuda12.8-cudnn9-runtime")
+
+def pull_custom_template_images():
+    """Pull all custom template images to avoid timeout during allocation"""
+    bt.logging.info("Starting pre-pull of custom template images...")
+
+    for image in CUSTOM_TEMPLATE_IMAGES:
+        try:
+            bt.logging.info(f"Pulling template image: {image}")
+            result = pull_image(image)
+            if result.get("status"):
+                bt.logging.info(f"Successfully pulled template: {image}")
+            else:
+                bt.logging.warning(f"Failed to pull template {image}: {result}")
+        except Exception as e:
+            bt.logging.warning(f"Error pulling template {image}: {e}")
+
+    bt.logging.info("Finished pre-pulling custom template images")
 
 
 def create_check_container(name="sn27-check-container"):
