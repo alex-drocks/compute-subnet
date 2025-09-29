@@ -64,6 +64,7 @@ from neurons.Validator.calculate_pow_score import calc_score_pog
 from neurons.Validator.database.allocate import update_miner_details, get_miner_details
 from neurons.Validator.database.miner import select_miners, purge_miner_entries, update_miners
 from neurons.Validator.health_check import perform_health_check
+from neurons.Validator.template_check import perform_template_check
 from neurons.Validator.pog import prng, adjust_matrix_size, compute_script_hash, execute_script_on_miner, get_random_seeds, load_yaml_config, parse_merkle_output, receive_responses, send_challenge_indices, send_script_and_request_hash, parse_benchmark_output, identify_gpu, send_seeds, verify_merkle_proof_row, get_remote_gpu_info, verify_responses, merkle_ok
 from neurons.Validator.database.pog import get_pog_specs, retrieve_stats, update_pog_stats, write_stats, purge_pog_stats
 
@@ -1071,31 +1072,59 @@ class Validator:
                     if health_check_result:
                         bt.logging.success(f"✅ {hotkey}: Health check passed")
                         bt.logging.trace(f"{hotkey}: [Step 8] Health check completed successfully - miner is accessible")
-                        await self._publish_pog_result_event(
-                            hotkey=hotkey,
-                            request_id=request_id,
-                            start_time=start_time,
-                            result="success",
-                            benchmark_data={
-                                "reported_gpu_number": num_gpus_reported,
-                                "reported_gpu_name": gpu_name_reported,
-                                "vram": vram,
-                                "size_fp16": size_fp16,
-                                "time_fp16": time_fp16,
-                                "size_fp32": size_fp32,
-                                "time_fp32": time_fp32,
-                                "fp16_tflops": fp16_tflops,
-                                "fp32_tflops": fp32_tflops,
-                                "identified_gpu_number": num_gpus,
-                                "identified_gpu_name": gpu_name,
-                                "average_multiplication_time": average_multiplication_time,
-                                "average_merkle_tree_time": average_merkle_tree_time,
-                                "verification_passed": verification_passed,
-                                "timing_passed": timing_passed,
-                            },
-                            health_check_result=health_check_result
-                        )
-                        return (hotkey, gpu_name, num_gpus)
+
+                        # Step 9: Perform template check after successful health check
+                        bt.logging.info(f"🖼️ {hotkey}: Health check passed, starting template availability check...")
+                        bt.logging.trace(f"{hotkey}: [Step 9] Initiating template check...")
+                        try:
+                            template_check_result = perform_template_check(axon, miner_info)
+                            if template_check_result.get("success", False):
+                                templates_score = template_check_result.get("templates_score", 0.0)
+                                available_count = len(template_check_result.get("available_templates", []))
+                                total_count = template_check_result.get("total_templates", 0)
+                                bt.logging.success(
+                                    f"✅ {hotkey}: Template check passed - "
+                                    f"{available_count}/{total_count} templates available ({templates_score:.1%})"
+                                )
+                                bt.logging.trace(f"{hotkey}: [Step 9] Template check completed successfully")
+
+                                # Template check passed, publish success event and return
+                                await self._publish_pog_result_event(
+                                    hotkey=hotkey,
+                                    request_id=request_id,
+                                    start_time=start_time,
+                                    result="success",
+                                    benchmark_data={
+                                        "reported_gpu_number": num_gpus_reported,
+                                        "reported_gpu_name": gpu_name_reported,
+                                        "vram": vram,
+                                        "size_fp16": size_fp16,
+                                        "time_fp16": time_fp16,
+                                        "size_fp32": size_fp32,
+                                        "time_fp32": time_fp32,
+                                        "fp16_tflops": fp16_tflops,
+                                        "fp32_tflops": fp32_tflops,
+                                        "identified_gpu_number": num_gpus,
+                                        "identified_gpu_name": gpu_name,
+                                        "average_multiplication_time": average_multiplication_time,
+                                        "average_merkle_tree_time": average_merkle_tree_time,
+                                        "verification_passed": verification_passed,
+                                        "timing_passed": timing_passed,
+                                    },
+                                    health_check_result=health_check_result
+                                )
+                                return (hotkey, gpu_name, num_gpus)
+                            else:
+                                error_msg = template_check_result.get("error_message", "Unknown error")
+                                bt.logging.warning(f"⚠️ {hotkey}: Template check failed - {error_msg}")
+                                bt.logging.trace(f"{hotkey}: [Step 9] Template check failed - {error_msg}")
+                                bt.logging.info(f"⚠️ {hotkey}: GPU Identification: Excluded from dashboard due to template check failure")
+                                return (hotkey, None, -1)  # Use -1 to indicate template check failure
+                        except Exception as template_error:
+                            bt.logging.error(f"❌ {hotkey}: Error during template check: {template_error}")
+                            bt.logging.trace(f"{hotkey}: [Step 9] Template check error: {template_error}")
+                            bt.logging.info(f"⚠️ {hotkey}: GPU Identification: Excluded from dashboard due to template check error")
+                            return (hotkey, None, -1)  # Use -1 to indicate template check error
                     else:
                         bt.logging.debug(f"⚠️ {hotkey}: Health check failed")
                         bt.logging.trace(f"{hotkey}: [Step 8] Health check failed - miner is not accessible")
