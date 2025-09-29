@@ -21,7 +21,6 @@ def get_required_templates() -> list:
         list: List of required template image names
     """
     return [
-        'ivanneural/sn27-direct-ssh:pytorch-2.7.1-cuda12.8-latest',  # Default image
         'nirepo/default-pytorch:2.8.0-cuda12.8-cudnn9-runtime',     # default-ubuntu-pytorch
         'nirepo/ollama-ssh:latest',                                   # ollama-ssh
         'nirepo/comfyui-ssh:latest',                                 # comfyui-ssh
