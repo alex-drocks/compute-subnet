@@ -238,7 +238,8 @@ def wait_for_health_check(host: str, port: int, timeout: int = 30, retry_interva
 
 def perform_health_check(
     axon: bt.AxonInfo,
-    miner_info: dict[str, str | int]
+    miner_info: dict[str, str | int],
+    ssh_client: paramiko.SSHClient = None
 ) -> bool:
     """
     Performs health check on a miner after POG has finished.
@@ -246,28 +247,33 @@ def perform_health_check(
     Args:
         axon: Axon information of the miner
         miner_info: Miner information (host, port, etc.) - always provided by POG
+        ssh_client: Existing SSH client connection (optional, will create if not provided)
 
     Returns:
         bool: True if health check is successful, False otherwise
     """
     hotkey = axon.hotkey
     host: str | None = None
-    ssh_client: paramiko.SSHClient | None = None
+    ssh_connection_created = False
     channel: paramiko.Channel | None = None
 
     try:
         host = miner_info['host']
 
-        # Connect via SSH
-        ssh_client = paramiko.SSHClient()
-        ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        try:
-            bt.logging.trace(f"{hotkey}: Attempting SSH connection to {host}")
-            ssh_client.connect(host, port=miner_info.get('port', 22), username=miner_info['username'], password=miner_info['password'], timeout=10)
-            bt.logging.trace(f"{hotkey}: SSH connection successful.")
-        except Exception as ssh_error:
-            bt.logging.debug(f"{hotkey}: SSH connection failed - miner may be offline or credentials incorrect: {ssh_error}")
-            return False
+        # Use existing SSH connection or create new one
+        if ssh_client is None:
+            ssh_client = paramiko.SSHClient()
+            ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            try:
+                bt.logging.trace(f"{hotkey}: Creating SSH connection for health check to {host}")
+                ssh_client.connect(host, port=miner_info.get('port', 22), username=miner_info['username'], password=miner_info['password'], timeout=10)
+                ssh_connection_created = True
+                bt.logging.trace(f"{hotkey}: SSH connection successful.")
+            except Exception as ssh_error:
+                bt.logging.debug(f"{hotkey}: SSH connection failed - miner may be offline or credentials incorrect: {ssh_error}")
+                return False
+        else:
+            bt.logging.trace(f"{hotkey}: Using existing SSH connection for health check")
 
         health_check_script_path = "neurons/Validator/health_check_server.py"
 
@@ -329,7 +335,8 @@ def perform_health_check(
         return False
 
     finally:
-        if ssh_client is not None:
+        # Only close SSH connection if we created it
+        if ssh_connection_created and ssh_client is not None:
             try:
                 if channel and not channel.closed:
                     bt.logging.trace(f"{hotkey}: Closing Paramiko channel.")
@@ -338,3 +345,10 @@ def perform_health_check(
                 bt.logging.trace(f"{hotkey}: SSH connection closed.")
             except Exception as e:
                 bt.logging.trace(f"{hotkey}: Error closing SSH connection or channel: {e}")
+        elif channel and not channel.closed:
+            # Always close the channel even if we don't close the SSH connection
+            try:
+                bt.logging.trace(f"{hotkey}: Closing Paramiko channel (keeping SSH connection).")
+                channel.close()
+            except Exception as e:
+                bt.logging.trace(f"{hotkey}: Error closing channel: {e}")

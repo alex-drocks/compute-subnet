@@ -1068,7 +1068,7 @@ class Validator:
                 bt.logging.debug(f"🏥 {hotkey}: POG completed successfully, starting health check...")
                 bt.logging.trace(f"{hotkey}: [Step 8] Initiating health check...")
                 try:
-                    health_check_result = perform_health_check(axon, miner_info)
+                    health_check_result = perform_health_check(axon, miner_info, ssh_client)
                     if health_check_result:
                         bt.logging.success(f"✅ {hotkey}: Health check passed")
                         bt.logging.trace(f"{hotkey}: [Step 8] Health check completed successfully - miner is accessible")
@@ -1077,7 +1077,7 @@ class Validator:
                         bt.logging.info(f"🖼️ {hotkey}: Health check passed, starting template availability check...")
                         bt.logging.trace(f"{hotkey}: [Step 9] Initiating template check...")
                         try:
-                            template_check_result = perform_template_check(axon, miner_info)
+                            template_check_result = perform_template_check(axon, miner_info, ssh_client)
                             if template_check_result.get("success", False):
                                 templates_score = template_check_result.get("templates_score", 0.0)
                                 available_count = len(template_check_result.get("available_templates", []))
