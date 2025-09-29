@@ -477,8 +477,12 @@ def pull_image(image: str = ''):
     name, tag = image.split(':', 1)
     api_client = docker.APIClient()
     try:
-        result = api_client.pull(name, tag=tag, stream=True)
-        message = f"Container image {image} pulled successfully {result}"
+        # Pull the image and consume the stream to actually download it
+        for line in api_client.pull(name, tag=tag, stream=True, decode=True):
+            if 'status' in line:
+                bt.logging.trace(f"Pull {image}: {line['status']}")
+
+        message = f"Container image {image} pulled successfully"
         bt.logging.info(message)
         return {"status": True, "message": message}
     except docker.errors.APIError as e:
