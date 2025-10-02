@@ -2,13 +2,12 @@
 """
 Template Check Module
 
-This module handles template availability check independently from POG and Health Check.
-It runs after Health Check has finished to verify custom template images availability.
+This module handles template availability check using Allocate request with checking=True.
+It verifies custom template images availability and validates their digests.
 """
 
-import paramiko
 import bittensor as bt
-import time
+from compute.protocol import Allocate
 
 
 # Expected digests for template images verification (SHA256 manifest digests from Docker Hub)
@@ -36,18 +35,19 @@ def get_required_templates() -> list:
     return list(TEMPLATE_EXPECTED_DIGESTS.keys())
 
 
-def check_docker_images_availability(ssh_client: paramiko.SSHClient, hotkey: str = "") -> dict:
+def verify_template_images(images_list: list, hotkey: str = "") -> dict:
     """
-    Check which custom template images are available on the miner via SSH.
+    Verify which custom template images are available and validate their digests.
 
     Args:
-        ssh_client (paramiko.SSHClient): SSH client connected to the miner
+        images_list (list): List of images from miner with {repository, tag, digest, full_name}
         hotkey (str): Hotkey for logging context
 
     Returns:
         dict: {
             "available_templates": list,
             "missing_templates": list,
+            "invalid_digests": list,
             "templates_score": float,
             "total_templates": int,
             "docker_available": bool
@@ -55,105 +55,85 @@ def check_docker_images_availability(ssh_client: paramiko.SSHClient, hotkey: str
     """
     required_templates = get_required_templates()
 
-    try:
-        # First check if docker is available
-        docker_check_command = "docker --version 2>/dev/null || echo 'DOCKER_NOT_FOUND'"
-        stdin, stdout, stderr = ssh_client.exec_command(docker_check_command)
-        docker_output = stdout.read().decode('utf-8').strip()
+    # Create a dict of available images by full_name
+    available_images_dict = {}
+    for img in images_list:
+        full_name = img.get("full_name")
+        if full_name:
+            available_images_dict[full_name] = img.get("digest")
 
-        if 'DOCKER_NOT_FOUND' in docker_output:
-            bt.logging.warning(f"{hotkey}: Docker not available on miner")
-            return {
-                "available_templates": [],
-                "missing_templates": required_templates,
-                "templates_score": 0.0,
-                "total_templates": len(required_templates),
-                "docker_available": False
-            }
+    bt.logging.trace(f"{hotkey}: Found {len(available_images_dict)} docker images on miner")
 
-        # Get docker images list with repository:tag format
-        images_command = "docker images --format 'table {{.Repository}}:{{.Tag}}' | grep -v 'REPOSITORY:TAG' | grep -v '^$'"
-        stdin, stdout, stderr = ssh_client.exec_command(images_command)
+    # Check which required templates are available and have correct digests
+    available_templates = []
+    missing_templates = []
+    invalid_digests = []
 
-        images_output = stdout.read().decode('utf-8').strip()
-        stderr_output = stderr.read().decode('utf-8').strip()
+    for template in required_templates:
+        expected_digest = TEMPLATE_EXPECTED_DIGESTS.get(template)
+        actual_digest = available_images_dict.get(template)
 
-        if stderr_output and "permission denied" in stderr_output.lower():
-            bt.logging.warning(f"{hotkey}: Docker permission denied - user may not be in docker group")
-            return {
-                "available_templates": [],
-                "missing_templates": required_templates,
-                "templates_score": 0.0,
-                "total_templates": len(required_templates),
-                "docker_available": False
-            }
+        if actual_digest is None:
+            # Template image not found
+            missing_templates.append(template)
+            bt.logging.trace(f"{hotkey}: ❌ Template missing: {template}")
+        elif actual_digest != expected_digest:
+            # Template found but digest doesn't match
+            invalid_digests.append({
+                "template": template,
+                "expected": expected_digest,
+                "actual": actual_digest
+            })
+            bt.logging.warning(
+                f"{hotkey}: ⚠️ Template digest mismatch: {template}\n"
+                f"  Expected: {expected_digest}\n"
+                f"  Actual:   {actual_digest}"
+            )
+        else:
+            # Template found and digest matches
+            available_templates.append(template)
+            bt.logging.trace(f"{hotkey}: ✅ Template available with correct digest: {template}")
 
-        # Parse available images
-        available_images = []
-        if images_output:
-            available_images = [img.strip() for img in images_output.split('\n') if img.strip()]
+    # Calculate score (only correctly verified templates count)
+    templates_score = len(available_templates) / len(required_templates) if required_templates else 0.0
 
-        bt.logging.trace(f"{hotkey}: Found {len(available_images)} docker images on miner")
+    bt.logging.info(
+        f"{hotkey}: Template check - {len(available_templates)}/{len(required_templates)} "
+        f"available with correct digests ({templates_score:.1%})"
+    )
 
-        # Check which required templates are available
-        available_templates = []
-        missing_templates = []
-
-        for template in required_templates:
-            if template in available_images:
-                available_templates.append(template)
-                bt.logging.trace(f"{hotkey}: ✅ Template available: {template}")
-            else:
-                missing_templates.append(template)
-                bt.logging.trace(f"{hotkey}: ❌ Template missing: {template}")
-
-        # Calculate score
-        templates_score = len(available_templates) / len(required_templates) if required_templates else 0.0
-
-        bt.logging.info(
-            f"{hotkey}: Template check - {len(available_templates)}/{len(required_templates)} "
-            f"available ({templates_score:.1%})"
+    if invalid_digests:
+        bt.logging.warning(
+            f"{hotkey}: Found {len(invalid_digests)} templates with invalid digests"
         )
 
-        return {
-            "available_templates": available_templates,
-            "missing_templates": missing_templates,
-            "templates_score": templates_score,
-            "total_templates": len(required_templates),
-            "docker_available": True
-        }
-
-    except Exception as e:
-        bt.logging.error(f"{hotkey}: Error checking docker images: {e}")
-        return {
-            "available_templates": [],
-            "missing_templates": required_templates,
-            "templates_score": 0.0,
-            "total_templates": len(required_templates),
-            "docker_available": False
-        }
+    return {
+        "available_templates": available_templates,
+        "missing_templates": missing_templates,
+        "invalid_digests": invalid_digests,
+        "templates_score": templates_score,
+        "total_templates": len(required_templates),
+        "docker_available": bool(images_list)
+    }
 
 
-def perform_template_check(
-    axon: bt.AxonInfo,
-    miner_info: dict[str, str | int],
-    ssh_client: paramiko.SSHClient = None
+async def perform_template_check(
+    dendrite: bt.dendrite,
+    axon: bt.AxonInfo
 ) -> dict:
     """
-    Performs template availability check on a miner.
-
-    This function should be called after health check has passed.
+    Performs template availability check via Allocate request with checking=True.
 
     Args:
+        dendrite: Dendrite instance to send requests
         axon: Axon information of the miner
-        miner_info: Miner information (host, port, etc.) - provided by POG
-        ssh_client: Existing SSH client connection from POG (optional, will create if not provided)
 
     Returns:
         dict: {
             "success": bool,
             "available_templates": list,
             "missing_templates": list,
+            "invalid_digests": list,
             "templates_score": float,
             "total_templates": int,
             "docker_available": bool,
@@ -161,102 +141,96 @@ def perform_template_check(
         }
     """
     hotkey = axon.hotkey
-    ssh_connection_created = False
 
     try:
-        # Use existing SSH connection from POG or create new one
-        if ssh_client is None:
-            host = miner_info['host']
-            ssh_client = paramiko.SSHClient()
-            ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        bt.logging.debug(f"{hotkey}: Sending Allocate request with checking=True for template verification")
 
-            try:
-                bt.logging.trace(f"{hotkey}: Creating SSH connection for template check to {host}")
-                ssh_client.connect(
-                    host,
-                    port=miner_info.get('port', 22),
-                    username=miner_info['username'],
-                    password=miner_info['password'],
-                    timeout=10
-                )
-                ssh_connection_created = True
-                bt.logging.trace(f"{hotkey}: SSH connection for template check successful")
-            except Exception as ssh_error:
-                bt.logging.error(f"{hotkey}: SSH connection for template check failed: {ssh_error}")
-                return {
-                    "success": False,
-                    "available_templates": [],
-                    "missing_templates": get_required_templates(),
-                    "templates_score": 0.0,
-                    "total_templates": len(get_required_templates()),
-                    "docker_available": False,
-                    "error_message": f"SSH connection failed: {ssh_error}"
-                }
-        else:
-            bt.logging.trace(f"{hotkey}: Using existing SSH connection from POG for template check")
+        # Send Allocate request with checking=True to get images list
+        allocate_request = Allocate(
+            timeline=1,
+            device_requirement={},
+            checking=True
+        )
 
-        bt.logging.debug(f"{hotkey}: Starting template availability check")
+        response = await dendrite.forward(
+            axons=[axon],
+            synapse=allocate_request,
+            deserialize=True,
+            timeout=15
+        )
 
-        # Perform the actual template check
-        template_result = check_docker_images_availability(ssh_client, hotkey)
+        if not response or len(response) == 0:
+            bt.logging.error(f"{hotkey}: No response from miner")
+            return {
+                "success": False,
+                "available_templates": [],
+                "missing_templates": get_required_templates(),
+                "invalid_digests": [],
+                "templates_score": 0.0,
+                "total_templates": len(get_required_templates()),
+                "docker_available": False,
+                "error_message": "No response from miner"
+            }
 
-        # Determine overall success - requires 100% templates available
+        output = response[0].output
+
+        if not output or not output.get("status"):
+            error_msg = output.get("message", "Unknown error") if output else "Empty response"
+            bt.logging.error(f"{hotkey}: Miner error: {error_msg}")
+            return {
+                "success": False,
+                "available_templates": [],
+                "missing_templates": get_required_templates(),
+                "invalid_digests": [],
+                "templates_score": 0.0,
+                "total_templates": len(get_required_templates()),
+                "docker_available": False,
+                "error_message": error_msg
+            }
+
+        # Get images list and verify
+        images_list = output.get("images", [])
+        template_result = verify_template_images(images_list, hotkey)
+
+        # Success requires 100% templates with correct digests
         docker_available = template_result.get("docker_available", False)
         templates_score = template_result.get("templates_score", 0.0)
-        success = docker_available and templates_score >= 1.0  # Requires 100% templates
+        invalid_digests = template_result.get("invalid_digests", [])
+        success = docker_available and templates_score >= 1.0 and len(invalid_digests) == 0
 
         if success:
-            bt.logging.info(
-                f"{hotkey}: Template check completed - "
-                f"{len(template_result['available_templates'])}/{template_result['total_templates']} "
-                f"templates available ({template_result['templates_score']:.1%})"
+            bt.logging.success(
+                f"✅ {hotkey}: All {template_result['total_templates']} templates verified with correct digests"
             )
         else:
-            missing_templates = template_result.get("missing_templates", [])
-            if missing_templates and docker_available:
-                bt.logging.warning(
-                    f"{hotkey}: Template check failed - Missing {len(missing_templates)} required templates:"
-                )
-                for i, template in enumerate(missing_templates, 1):
-                    bt.logging.warning(f"{hotkey}:   {i}. {template}")
-                bt.logging.info(
-                    f"{hotkey}: 💡 To fix this issue, run these commands on your miner:"
-                )
-                for template in missing_templates:
-                    bt.logging.info(f"{hotkey}:   docker pull {template}")
-            else:
-                bt.logging.warning(f"{hotkey}: Template check failed - Docker not available or accessible")
+            if template_result.get("missing_templates"):
+                bt.logging.warning(f"{hotkey}: Missing templates: {template_result['missing_templates']}")
+            if invalid_digests:
+                bt.logging.warning(f"{hotkey}: {len(invalid_digests)} templates with invalid digests")
 
         return {
             "success": success,
             "available_templates": template_result["available_templates"],
             "missing_templates": template_result["missing_templates"],
+            "invalid_digests": invalid_digests,
             "templates_score": template_result["templates_score"],
             "total_templates": template_result["total_templates"],
-            "docker_available": template_result["docker_available"],
+            "docker_available": docker_available,
             "error_message": None if success else (
-                f"Missing {len(template_result.get('missing_templates', []))} required templates"
-                if docker_available else "Docker not available or permission denied"
+                f"Missing {len(template_result.get('missing_templates', []))} templates, "
+                f"{len(invalid_digests)} invalid digests"
             )
         }
 
     except Exception as e:
-        bt.logging.error(f"{hotkey}: Unexpected error during template check: {e}")
+        bt.logging.error(f"{hotkey}: Template check error: {e}")
         return {
             "success": False,
             "available_templates": [],
             "missing_templates": get_required_templates(),
+            "invalid_digests": [],
             "templates_score": 0.0,
             "total_templates": len(get_required_templates()),
             "docker_available": False,
-            "error_message": f"Unexpected error: {e}"
+            "error_message": str(e)
         }
-
-    finally:
-        # Only close SSH connection if we created it
-        if ssh_connection_created and ssh_client is not None:
-            try:
-                ssh_client.close()
-                bt.logging.trace(f"{hotkey}: SSH connection for template check closed")
-            except Exception as e:
-                bt.logging.trace(f"{hotkey}: Error closing SSH connection for template check: {e}")
