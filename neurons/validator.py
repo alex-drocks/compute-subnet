@@ -1068,7 +1068,7 @@ class Validator:
                 bt.logging.debug(f"🏥 {hotkey}: POG completed successfully, starting health check...")
                 bt.logging.trace(f"{hotkey}: [Step 8] Initiating health check...")
                 try:
-                    health_check_result = perform_health_check(axon, miner_info, ssh_client)
+                    health_check_result = perform_health_check(axon, miner_info)
                     if health_check_result:
                         bt.logging.success(f"✅ {hotkey}: Health check passed")
                         bt.logging.trace(f"{hotkey}: [Step 8] Health check completed successfully - miner is accessible")
@@ -1077,7 +1077,7 @@ class Validator:
                         bt.logging.info(f"🖼️ {hotkey}: Health check passed, starting template availability check...")
                         bt.logging.trace(f"{hotkey}: [Step 9] Initiating template check...")
                         try:
-                            template_check_result = perform_template_check(axon, miner_info, ssh_client)
+                            template_check_result = perform_template_check(axon, miner_info)
                             if template_check_result.get("success", False):
                                 templates_score = template_check_result.get("templates_score", 0.0)
                                 available_count = len(template_check_result.get("available_templates", []))
@@ -1119,11 +1119,65 @@ class Validator:
                                 bt.logging.warning(f"⚠️ {hotkey}: Template check failed - {error_msg}")
                                 bt.logging.trace(f"{hotkey}: [Step 9] Template check failed - {error_msg}")
                                 bt.logging.info(f"⚠️ {hotkey}: GPU Identification: Excluded from dashboard due to template check failure")
+
+                                # Publish POG result with template check failure
+                                await self._publish_pog_result_event(
+                                    hotkey=hotkey,
+                                    request_id=request_id,
+                                    start_time=start_time,
+                                    result="failure",
+                                    error_details=f"Template check failed: {error_msg}",
+                                    health_check_result=health_check_result,
+                                    benchmark_data={
+                                        "reported_gpu_number": num_gpus_reported,
+                                        "reported_gpu_name": gpu_name_reported,
+                                        "vram": vram,
+                                        "size_fp16": size_fp16,
+                                        "time_fp16": time_fp16,
+                                        "size_fp32": size_fp32,
+                                        "time_fp32": time_fp32,
+                                        "fp16_tflops": fp16_tflops,
+                                        "fp32_tflops": fp32_tflops,
+                                        "identified_gpu_number": num_gpus,
+                                        "identified_gpu_name": gpu_name,
+                                        "average_multiplication_time": average_multiplication_time,
+                                        "average_merkle_tree_time": average_merkle_tree_time,
+                                        "verification_passed": verification_passed,
+                                        "timing_passed": timing_passed,
+                                    }
+                                )
                                 return (hotkey, None, -1)  # Use -1 to indicate template check failure
                         except Exception as template_error:
                             bt.logging.error(f"❌ {hotkey}: Error during template check: {template_error}")
                             bt.logging.trace(f"{hotkey}: [Step 9] Template check error: {template_error}")
                             bt.logging.info(f"⚠️ {hotkey}: GPU Identification: Excluded from dashboard due to template check error")
+
+                            # Publish POG result with template check error
+                            await self._publish_pog_result_event(
+                                hotkey=hotkey,
+                                request_id=request_id,
+                                start_time=start_time,
+                                result="error",
+                                error_details=f"Template check error: {str(template_error)}",
+                                health_check_result=health_check_result,
+                                benchmark_data={
+                                    "reported_gpu_number": num_gpus_reported,
+                                    "reported_gpu_name": gpu_name_reported,
+                                    "vram": vram,
+                                    "size_fp16": size_fp16,
+                                    "time_fp16": time_fp16,
+                                    "size_fp32": size_fp32,
+                                    "time_fp32": time_fp32,
+                                    "fp16_tflops": fp16_tflops,
+                                    "fp32_tflops": fp32_tflops,
+                                    "identified_gpu_number": num_gpus,
+                                    "identified_gpu_name": gpu_name,
+                                    "average_multiplication_time": average_multiplication_time,
+                                    "average_merkle_tree_time": average_merkle_tree_time,
+                                    "verification_passed": verification_passed,
+                                    "timing_passed": timing_passed,
+                                }
+                            )
                             return (hotkey, None, -1)  # Use -1 to indicate template check error
                     else:
                         bt.logging.debug(f"⚠️ {hotkey}: Health check failed")

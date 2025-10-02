@@ -132,18 +132,16 @@ def check_docker_images_availability(ssh_client: paramiko.SSHClient, hotkey: str
 
 def perform_template_check(
     axon: bt.AxonInfo,
-    miner_info: dict[str, str | int],
-    ssh_client: paramiko.SSHClient = None
+    miner_info: dict[str, str | int]
 ) -> dict:
     """
     Performs template availability check on a miner.
 
-    This function should be called after health check has passed and while SSH connection is still open.
+    This function should be called after health check has passed.
 
     Args:
         axon: Axon information of the miner
         miner_info: Miner information (host, port, etc.) - provided by POG
-        ssh_client: Existing SSH client connection (optional, will create if not provided)
 
     Returns:
         dict: {
@@ -157,37 +155,34 @@ def perform_template_check(
         }
     """
     hotkey = axon.hotkey
-    ssh_connection_created = False
+    ssh_client = None
 
     try:
-        # Use existing SSH connection or create new one
-        if ssh_client is None:
-            host = miner_info['host']
-            ssh_client = paramiko.SSHClient()
-            ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        host = miner_info['host']
+        ssh_client = paramiko.SSHClient()
+        ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
-            try:
-                bt.logging.trace(f"{hotkey}: Creating SSH connection for template check to {host}")
-                ssh_client.connect(
-                    host,
-                    port=miner_info.get('port', 22),
-                    username=miner_info['username'],
-                    password=miner_info['password'],
-                    timeout=10
-                )
-                ssh_connection_created = True
-                bt.logging.trace(f"{hotkey}: SSH connection for template check successful")
-            except Exception as ssh_error:
-                bt.logging.error(f"{hotkey}: SSH connection for template check failed: {ssh_error}")
-                return {
-                    "success": False,
-                    "available_templates": [],
-                    "missing_templates": get_required_templates(),
-                    "templates_score": 0.0,
-                    "total_templates": len(get_required_templates()),
-                    "docker_available": False,
-                    "error_message": f"SSH connection failed: {ssh_error}"
-                }
+        try:
+            bt.logging.trace(f"{hotkey}: Creating SSH connection for template check to {host}")
+            ssh_client.connect(
+                host,
+                port=miner_info.get('port', 22),
+                username=miner_info['username'],
+                password=miner_info['password'],
+                timeout=10
+            )
+            bt.logging.trace(f"{hotkey}: SSH connection for template check successful")
+        except Exception as ssh_error:
+            bt.logging.error(f"{hotkey}: SSH connection for template check failed: {ssh_error}")
+            return {
+                "success": False,
+                "available_templates": [],
+                "missing_templates": get_required_templates(),
+                "templates_score": 0.0,
+                "total_templates": len(get_required_templates()),
+                "docker_available": False,
+                "error_message": f"SSH connection failed: {ssh_error}"
+            }
 
         bt.logging.debug(f"{hotkey}: Starting template availability check")
 
@@ -247,8 +242,7 @@ def perform_template_check(
         }
 
     finally:
-        # Only close SSH connection if we created it
-        if ssh_connection_created and ssh_client is not None:
+        if ssh_client is not None:
             try:
                 ssh_client.close()
                 bt.logging.trace(f"{hotkey}: SSH connection for template check closed")
