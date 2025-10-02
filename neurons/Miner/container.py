@@ -497,3 +497,72 @@ def pull_image(image: str = ''):
             status=False,
             exception=e,
         )
+
+
+def get_docker_images_list() -> dict:
+    """
+    Get list of all Docker images with their RepoDigests using Docker API.
+
+    Returns:
+        dict: {
+            "status": bool,
+            "images": list[dict] with {repository, tag, digest},
+            "message": str
+        }
+    """
+    try:
+        client = docker.from_env()
+        images = client.images.list(all=True)
+
+        images_list = []
+        for image in images:
+            # Get RepoDigests (manifest digests from registry)
+            repo_digests = image.attrs.get('RepoDigests', [])
+
+            # Get image tags
+            tags = image.tags if image.tags else []
+
+            if tags:
+                for tag in tags:
+                    # Parse repository:tag format
+                    if ':' in tag:
+                        repository, image_tag = tag.rsplit(':', 1)
+                    else:
+                        repository = tag
+                        image_tag = 'latest'
+
+                    # Find matching digest for this repo
+                    matching_digest = None
+                    for digest in repo_digests:
+                        if digest.startswith(f"{repository}@"):
+                            matching_digest = digest.split('@')[1]
+                            break
+
+                    images_list.append({
+                        "repository": repository,
+                        "tag": image_tag,
+                        "digest": matching_digest,
+                        "full_name": f"{repository}:{image_tag}"
+                    })
+
+        bt.logging.trace(f"Retrieved {len(images_list)} Docker images with digests")
+        return {
+            "status": True,
+            "images": images_list,
+            "message": f"Successfully retrieved {len(images_list)} images"
+        }
+
+    except docker.errors.DockerException as e:
+        bt.logging.error(f"Docker error while listing images: {e}")
+        return {
+            "status": False,
+            "images": [],
+            "message": f"Docker error: {str(e)}"
+        }
+    except Exception as e:
+        bt.logging.error(f"Error listing Docker images: {e}")
+        return {
+            "status": False,
+            "images": [],
+            "message": f"Error: {str(e)}"
+        }

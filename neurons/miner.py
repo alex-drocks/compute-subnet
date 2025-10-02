@@ -435,7 +435,7 @@ class Miner:
 
         if checking is True:
             if timeline > 0:  # positive means allocate, negative means deallocate (FIXME: this is weird)
-                result = check_allocation(timeline, device_requirement)
+                result = check_allocation(timeline, device_requirement, checking=True)
                 synapse.output = result
             else:
                 public_key = synapse.public_key
