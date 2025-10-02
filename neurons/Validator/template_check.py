@@ -11,6 +11,19 @@ import bittensor as bt
 import time
 
 
+# Expected digests for template images verification (SHA256 manifest digests from Docker Hub)
+TEMPLATE_EXPECTED_DIGESTS = {
+    'nirepo/default-pytorch:2.8.0-cuda12.8-cudnn9-runtime': 'sha256:75c5f262ff46a0b4eb84d914c9f0740d5fc79478a366085fbfd6bce51f48cfe9',
+    'nirepo/ollama-ssh:latest': 'sha256:b689dee49d9b03753d6f76e5ab2f4d6b655d1080234bcc070b1f54e937f233c5',
+    'nirepo/comfyui-ssh:latest': 'sha256:312411098589ca6e8b557589f4dcf5be2a2367045f724ffe807befc4bedc14f1',
+    'nirepo/automatic1111-ssh:latest': 'sha256:5a6da72aabccd04a897706052191db61876dfdc5461b51feebfb1b61912b5e6a',
+    'nirepo/scientific-ssh:latest': 'sha256:40c93cdcba24212a71f9348b65d79ed59f113996eed36711c5cb8d240fbebc7e',
+    'nirepo/jupyter-scipy-ssh:latest': 'sha256:4831abb222b3ac6cdfa17b8d9a6efad10f5555cb5497548b201143e1218a923c',
+    'nirepo/jupyter-spark-ssh:latest': 'sha256:0ea465a32d093670374ffd883a39b45d2835043a0fc5507ad68e4c3838b4242f',
+    'nirepo/jupyter-tensorflow-ssh:latest': 'sha256:a11b46549c4dd26e06c8dd733d5ecfa1384211e6e0964c38420f5021fe5a9f6e',
+}
+
+
 def get_required_templates() -> list:
     """
     Get list of required custom template images.
@@ -20,16 +33,7 @@ def get_required_templates() -> list:
     Returns:
         list: List of required template image names
     """
-    return [
-        'nirepo/default-pytorch:2.8.0-cuda12.8-cudnn9-runtime',     # default-ubuntu-pytorch
-        'nirepo/ollama-ssh:latest',                                   # ollama-ssh
-        'nirepo/comfyui-ssh:latest',                                 # comfyui-ssh
-        'nirepo/automatic1111-ssh:latest',                           # automatic1111-ssh
-        'nirepo/scientific-ssh:latest',                              # scientific-ssh
-        'nirepo/jupyter-scipy-ssh:latest',                           # jupyter-scipy-ssh
-        'nirepo/jupyter-spark-ssh:latest',                           # jupyter-spark-ssh
-        'nirepo/jupyter-tensorflow-ssh:latest',                      # jupyter-tensorflow-ssh
-    ]
+    return list(TEMPLATE_EXPECTED_DIGESTS.keys())
 
 
 def check_docker_images_availability(ssh_client: paramiko.SSHClient, hotkey: str = "") -> dict:
