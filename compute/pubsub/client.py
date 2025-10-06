@@ -8,6 +8,7 @@ SN27 token gateway authentication flow.
 import asyncio
 import json
 import logging
+import os
 import time
 from typing import Callable
 from google.cloud import pubsub_v1
@@ -19,6 +20,12 @@ from .message_types import PubSubMessage, TOPICS
 from .message_factory import MessageFactory
 from .exceptions import AuthenticationError, ConfigurationError, PublishError
 
+
+def get_bool_env(var_name: str, default: bool = False) -> bool:
+    val = os.getenv(var_name)
+    if val is None:
+        return default
+    return val.lower() in ("1", "true", "yes", "y", "on")
 
 class PubSubClient:
     """
@@ -51,7 +58,10 @@ class PubSubClient:
         self.logger = logging.getLogger(__name__)
 
         # Check if pubsub is disabled
-        self.disabled = getattr(config, 'pubsub_disabled', False)
+        self.disabled = (
+            getattr(config, 'pubsub_disabled', False) or
+            get_bool_env('PUBSUB_DISABLE', False)
+        )
         if self.disabled:
             self.logger.info("PubSub functionality disabled via --pubsub.disable flag")
             return
