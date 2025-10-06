@@ -261,6 +261,87 @@ def check_container():
         return False
 
 
+def get_deployed_container_info():
+    """
+    Get info about currently deployed container and its image.
+
+    Returns:
+        dict: {
+            "has_container": bool,
+            "container_name": str | None,
+            "deployed_image": {
+                "image": str,
+                "digest": str | None
+            } | None
+        }
+    """
+    try:
+        client = docker.from_env()
+
+        # Check for production container first, then test
+        container = get_container(PROD_CONTAINER_NAME)
+        container_name = PROD_CONTAINER_NAME
+
+        if container is None:
+            container = get_container(TEST_CONTAINER_NAME)
+            container_name = TEST_CONTAINER_NAME
+
+        if container is None:
+            return {
+                "has_container": False,
+                "container_name": None,
+                "deployed_image": None
+            }
+
+        # Get image info from running container
+        image_name = container.image.tags[0] if container.image.tags else None
+
+        if image_name:
+            try:
+                image = client.images.get(image_name)
+                repo_digests = image.attrs.get('RepoDigests', [])
+                digest = None
+
+                if repo_digests:
+                    for repo_digest in repo_digests:
+                        if '@' in repo_digest:
+                            digest = repo_digest.split('@')[1]
+                            break
+
+                return {
+                    "has_container": True,
+                    "container_name": container_name,
+                    "deployed_image": {
+                        "image": image_name,
+                        "digest": digest
+                    }
+                }
+            except Exception as e:
+                bt.logging.warning(f"Error getting deployed image info: {e}")
+                return {
+                    "has_container": True,
+                    "container_name": container_name,
+                    "deployed_image": {
+                        "image": image_name,
+                        "digest": None
+                    }
+                }
+
+        return {
+            "has_container": True,
+            "container_name": container_name,
+            "deployed_image": None
+        }
+
+    except Exception as e:
+        bt.logging.error(f"Error in get_deployed_container_info: {e}")
+        return {
+            "has_container": False,
+            "container_name": None,
+            "deployed_image": None
+        }
+
+
 # Randomly generate password for given length
 def password_generator(length):
     alphabet = string.ascii_letters + string.digits  # You can customize this as needed

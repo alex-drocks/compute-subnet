@@ -22,7 +22,7 @@ import os
 from io import BytesIO
 
 from compute.utils.exceptions import make_error_response
-from neurons.Miner.container import kill_container, run_container, check_container, check_allocation_key, get_docker_images_list
+from neurons.Miner.container import kill_container, run_container, check_container, check_allocation_key, get_docker_images_list, get_deployed_container_info
 from neurons.Miner.schedule import start
 
 
@@ -98,12 +98,15 @@ def deregister_allocation(public_key):
 
 # Check if miner is acceptable
 def check_allocation(timeline, device_requirement, checking=False):
-    # If checking=True, return Docker images list
+    # If checking=True, return Docker images list and deployed container info
     if checking:
         images_result = get_docker_images_list()
+        deployed_container = get_deployed_container_info()
+
         return {
             "status": images_result["status"],
             "images": images_result.get("images", []),
+            "deployed_container": deployed_container,
             "message": images_result.get("message", "")
         }
 
