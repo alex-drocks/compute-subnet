@@ -50,6 +50,12 @@ class PubSubClient:
         self.auto_refresh_interval = auto_refresh_interval
         self.logger = logging.getLogger(__name__)
 
+        # Check if pubsub is disabled
+        self.disabled = getattr(config, 'pubsub_disabled', False)
+        if self.disabled:
+            self.logger.info("PubSub functionality disabled via --pubsub.disable flag")
+            return
+
         # Initialize authentication
         if not wallet or not config:
             raise ConfigurationError("wallet and config are required for token gateway authentication")
@@ -136,6 +142,9 @@ class PubSubClient:
         Returns:
             True if successful, False if all retries failed
         """
+        if self.disabled:
+            return True
+
         last_error = None
 
         for attempt in range(max_retries):
@@ -293,6 +302,9 @@ class PubSubClient:
         Returns:
             Message ID or queued ID
         """
+        if self.disabled:
+            return None
+
         try:
             # Create PoG result message
             message = self._message_factory.create_pog_result(
@@ -329,6 +341,9 @@ class PubSubClient:
         Returns:
             Message ID or queued ID
         """
+        if self.disabled:
+            return None
+
         try:
             # Create Miner allocation result message
             message = self._message_factory.create_miner_allocation(
@@ -363,6 +378,9 @@ class PubSubClient:
         Returns:
             Message ID or queued ID
         """
+        if self.disabled:
+            return None
+
         try:
             # Create Miner deallocation result message
             message = self._message_factory.create_miner_deallocation(
@@ -626,6 +644,9 @@ class PubSubClient:
         """
         Subscribe to all the pub sub topics.
         """
+        if self.disabled:
+            return
+
         # Ensure clients are initialized
         if not self._ensure_clients_initialized():
             return
