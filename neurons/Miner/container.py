@@ -157,6 +157,31 @@ def run_container(cpu_usage, ram_usage, hard_disk_usage, gpu_usage, public_key, 
             # volumes={ docker_volume: {'bind': '/root/workspace/', 'mode': 'rw'}},
         )
 
+        # Get deployed image digest for validation
+        deployed_image_info = None
+        try:
+            deployed_image = client.images.get(docker_image)
+            repo_digests = deployed_image.attrs.get('RepoDigests', [])
+            digest = None
+            if repo_digests:
+                # Extract digest from format "repository@sha256:..."
+                for repo_digest in repo_digests:
+                    if '@' in repo_digest:
+                        digest = repo_digest.split('@')[1]
+                        break
+
+            deployed_image_info = {
+                "image": docker_image,
+                "digest": digest
+            }
+            bt.logging.trace(f"Deployed image: {docker_image}, digest: {digest}")
+        except Exception as e:
+            bt.logging.warning(f"Failed to get deployed image digest: {e}")
+            deployed_image_info = {
+                "image": docker_image,
+                "digest": None
+            }
+
         # Check the status to determine if the container ran successfully
         if container.status == "created":
             bt.logging.info("Container was created successfully.")
@@ -185,7 +210,12 @@ def run_container(cpu_usage, ram_usage, hard_disk_usage, gpu_usage, public_key, 
             with open(file_path, 'w') as file:
                 file.write(allocation_key)
             message = "Container started successfully."
-            return {"status": True, "info": encrypted_info, "message": message}
+            return {
+                "status": True,
+                "info": encrypted_info,
+                "message": message,
+                "deployed_image": deployed_image_info
+            }
         else:
             return make_error_response(
                 f"Container failed with status: {container.status}",
