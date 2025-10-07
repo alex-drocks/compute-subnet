@@ -1077,8 +1077,10 @@ class Validator:
                         bt.logging.info(f"🖼️ {hotkey}: Health check passed, starting template availability check...")
                         bt.logging.trace(f"{hotkey}: [Step 9] Initiating template check...")
                         try:
+                            # Create dendrite for template check
+                            dendrite = bt.Dendrite(wallet=self.wallet)
                             # Use Allocate request with checking=True for template verification
-                            template_check_result = await perform_template_check(self.dendrite, axon)
+                            template_check_result = await perform_template_check(dendrite, axon)
                             if template_check_result.get("success", False):
                                 templates_score = template_check_result.get("templates_score", 0.0)
                                 available_count = len(template_check_result.get("available_templates", []))
