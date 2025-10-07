@@ -112,6 +112,13 @@ class ComputeArgPaser(argparse.ArgumentParser):
             type=int,
             default=20,
         )
+        self.add_argument(
+            "--pubsub.disable",
+            action="store_true",
+            dest="pubsub_disabled",
+            help="Disable pubsub functionality. Default: False.",
+            default=False,
+        )
 
     def add_miner_argument(self):
         self.add_argument(
