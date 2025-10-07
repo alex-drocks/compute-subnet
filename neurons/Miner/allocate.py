@@ -97,9 +97,9 @@ def deregister_allocation(public_key):
         )
 
 # Check if miner is acceptable
-def check_allocation(timeline, device_requirement, checking=False):
-    # If checking=True, return Docker images list and deployed container info
-    if checking:
+def check_allocation(timeline, device_requirement, docker_info=False):
+    # If docker_info=True, return Docker images list and deployed container info
+    if docker_info:
         images_result = get_docker_images_list()
         deployed_container = get_deployed_container_info()
 

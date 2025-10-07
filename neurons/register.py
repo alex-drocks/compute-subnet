@@ -141,7 +141,7 @@ def allocate_container(config, device_requirement, timeline, public_key):
         if axon.hotkey in candidates_hotkey:
             axon_candidates.append(axon)
 
-    responses = dendrite.query(axon_candidates, Allocate(timeline=timeline, device_requirement=device_requirement, checking=True))
+    responses = dendrite.query(axon_candidates, Allocate(timeline=timeline, device_requirement=device_requirement, docker_info=True))
 
     final_candidates_hotkey = []
 
@@ -166,7 +166,7 @@ def allocate_container(config, device_requirement, timeline, public_key):
         axon = metagraph.axons[index]
         register_response = dendrite.query(
             axon,
-            Allocate(timeline=timeline, device_requirement=device_requirement, checking=False, public_key=public_key),
+            Allocate(timeline=timeline, device_requirement=device_requirement, docker_info=False, public_key=public_key),
             timeout=60,
         )
         if register_response and register_response["status"] is True:
@@ -210,13 +210,13 @@ def allocate_container_hotkey(config, hotkey, timeline, public_key):
         if axon.hotkey == hotkey:
             check_allocation = dendrite.query(
                 axon,
-                Allocate(timeline=timeline, device_requirement=device_requirement, checking=True),
+                Allocate(timeline=timeline, device_requirement=device_requirement, docker_info=True),
                 timeout=60,
                 )
             if check_allocation  and check_allocation ["status"] is True:
                 register_response = dendrite.query(
                     axon,
-                    Allocate(timeline=timeline, device_requirement=device_requirement, checking=False, public_key=public_key, docker_requirement=docker_requirement),
+                    Allocate(timeline=timeline, device_requirement=device_requirement, docker_info=False, public_key=public_key, docker_requirement=docker_requirement),
                     timeout=60,
                     )
                 if register_response and register_response["status"] is True:
@@ -418,7 +418,7 @@ def deallocate(wandb):
                     if not debug:
                         deregister_response = dendrite.query(
                             axon,
-                            Allocate(timeline=0, device_requirement="", checking=False, public_key=regkey),
+                            Allocate(timeline=0, device_requirement="", docker_info=False, public_key=regkey),
                             timeout=60,
                         )
                     if deregister_response and deregister_response["status"] is True:

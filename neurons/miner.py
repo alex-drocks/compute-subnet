@@ -409,7 +409,7 @@ class Miner:
 
     def update_allocation(self, synapse: Allocate):
         if (
-            not synapse.checking
+            not synapse.docker_info
             and isinstance(synapse.output, dict)
             and synapse.output.get("status") is True
         ):
@@ -424,7 +424,7 @@ class Miner:
     def allocate(self, synapse: Allocate) -> Allocate:
         timeline = synapse.timeline
         device_requirement = synapse.device_requirement
-        checking = synapse.checking
+        docker_info = synapse.docker_info
         docker_requirement = synapse.docker_requirement
         docker_requirement["external_ports"] = {
             "ssh": int(self.config.ssh.port),
@@ -433,9 +433,9 @@ class Miner:
         docker_change = synapse.docker_change
         docker_action = synapse.docker_action
 
-        if checking is True:
+        if docker_info is True:
             if timeline > 0:  # positive means allocate, negative means deallocate (FIXME: this is weird)
-                result = check_allocation(timeline, device_requirement, checking=True)
+                result = check_allocation(timeline, device_requirement, docker_info=True)
                 synapse.output = result
             else:
                 public_key = synapse.public_key

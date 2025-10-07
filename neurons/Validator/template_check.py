@@ -2,7 +2,7 @@
 """
 Template Check Module
 
-This module handles template availability check using Allocate request with checking=True.
+This module handles template availability check using Allocate request with docker_info=True.
 It verifies custom template images availability and validates their digests.
 """
 
@@ -118,14 +118,14 @@ def verify_template_images(images_list: list, hotkey: str = "") -> dict:
 
 
 async def perform_template_check(
-    dendrite: bt.dendrite,
+    wallet: bt.wallet,
     axon: bt.AxonInfo
 ) -> dict:
     """
-    Performs template availability check via Allocate request with checking=True.
+    Performs template availability check via Allocate request with docker_info=True.
 
     Args:
-        dendrite: Dendrite instance to send requests
+        wallet: Wallet instance to create dendrite
         axon: Axon information of the miner
 
     Returns:
@@ -143,23 +143,20 @@ async def perform_template_check(
     hotkey = axon.hotkey
 
     try:
-        bt.logging.debug(f"{hotkey}: Sending Allocate request with checking=True for template verification")
+        bt.logging.debug(f"{hotkey}: Sending Allocate request with docker_info=True for template verification")
 
-        # Send Allocate request with checking=True to get images list
-        allocate_request = Allocate(
-            timeline=1,
-            device_requirement={},
-            checking=True
-        )
+        async with bt.dendrite(wallet=wallet) as dendrite:
+            response = await dendrite(
+                axon,
+                Allocate(
+                    timeline=1,
+                    device_requirement={},
+                    docker_info=True
+                ),
+                timeout=15,
+            )
 
-        response = await dendrite.forward(
-            axons=[axon],
-            synapse=allocate_request,
-            deserialize=True,
-            timeout=15
-        )
-
-        if not response or len(response) == 0:
+        if not response:
             bt.logging.error(f"{hotkey}: No response from miner")
             return {
                 "success": False,
@@ -172,7 +169,7 @@ async def perform_template_check(
                 "error_message": "No response from miner"
             }
 
-        output = response[0].output
+        output = response.output
 
         if not output or not output.get("status"):
             error_msg = output.get("message", "Unknown error") if output else "Empty response"
