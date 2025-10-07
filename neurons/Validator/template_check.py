@@ -153,7 +153,7 @@ async def perform_template_check(
                     device_requirement={},
                     docker_info=True
                 ),
-                timeout=15,
+                timeout=30,
             )
 
         if not response:
