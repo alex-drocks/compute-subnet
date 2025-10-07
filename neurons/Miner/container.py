@@ -157,7 +157,7 @@ def run_container(cpu_usage, ram_usage, hard_disk_usage, gpu_usage, public_key, 
             ports=ports_mapping,
             init=False,
             shm_size=f"{shm_size_gb}g",  # Set the shared memory size to 2GB
-            restart_policy={"Name": "on-failure", "MaximumRetryCount": 3},
+            restart_policy={"Name": "unless-stopped"},
             # volumes={ docker_volume: {'bind': '/root/workspace/', 'mode': 'rw'}},
         )
 
