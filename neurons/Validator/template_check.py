@@ -169,7 +169,7 @@ async def perform_template_check(
                 "error_message": "No response from miner"
             }
 
-        output = response.output
+        output = response
 
         if not output or not output.get("status"):
             error_msg = output.get("message", "Unknown error") if output else "Empty response"
