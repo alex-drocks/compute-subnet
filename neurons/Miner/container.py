@@ -46,6 +46,8 @@ INTERNAL_USER_PORT = 27015  # Port inside the container for user applications
 #image_name_base = "ssh-image-base"  # Docker image name
 PROD_CONTAINER_NAME = "ssh-container"
 TEST_CONTAINER_NAME = "ssh-test-container"
+STOP_TIMEOUT = 1
+WAIT_TIMEOUT = 10
 container_name = "ssh-container"  # Docker container name
 container_name_test = "ssh-test-container"
 volume_name = "ssh-volume"  # Docker volumne name
@@ -78,9 +80,9 @@ def kill_container(public_key: str | None = None):
         # "dereg mode" is the only one killing prod container
         if running_container := get_container(PROD_CONTAINER_NAME):
             if running_container.status == "running":
-                running_container.exec_run(cmd="kill -15 1")
-                running_container.wait()
-            running_container.remove()
+                running_container.stop(timeout=STOP_TIMEOUT)
+                running_container.wait(timeout=WAIT_TIMEOUT)
+            running_container.remove(force=True)
         bt.logging.info(f"Container '{container_name}' was killed successfully")
     elif public_key:
         return key_check_result
@@ -88,16 +90,18 @@ def kill_container(public_key: str | None = None):
     # test container is always killed
     if running_container_test := get_container(TEST_CONTAINER_NAME):
         if running_container_test.status == "running":
-            running_container_test.exec_run(cmd="kill -15 1")
-            running_container_test.wait()
-        running_container_test.remove()
+            running_container_test.stop(timeout=STOP_TIMEOUT)
+            running_container_test.wait(timeout=WAIT_TIMEOUT)
+        running_container_test.remove(force=True)
         bt.logging.info(f"Container '{container_name_test}' was killed successfully")
     else:
         bt.logging.info("No running container found.")
 
     # Remove all dangling images
-    client, _ = get_docker()
-    client.images.prune(filters={"dangling": True})
+    # FIXME: probably inappropriate place for this now (we don't dangle anymore, we have a prebuilt set of images)
+    # TODO: review if any regular maintenance like this should be put in some better place
+    #client, _ = get_docker()
+    #client.images.prune(filters={"dangling": True})
     return {"status": True}
 
 
@@ -398,8 +402,8 @@ def restart_container(public_key: str):
         if ssh_container := get_container(PROD_CONTAINER_NAME):
             # stop and remove the container by using the SIGTERM signal to PID 1 (init) process in the container
             if ssh_container.status == "running":
-                ssh_container.exec_run(cmd="kill -15 1")
-                ssh_container.wait()
+                ssh_container.stop(timeout=STOP_TIMEOUT)
+                ssh_container.wait(timeout=WAIT_TIMEOUT)
             # Restart container
             ssh_container.restart()
             # Reload the container to get updated information
