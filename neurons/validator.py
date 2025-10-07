@@ -307,6 +307,12 @@ class Validator:
         Every `_cfg_pull_interval` seconds, fetch the latest JSON config
         from your Streamlit/FastAPI endpoint and re‐apply *all* blocks.
         """
+
+        # Skip remote config refresh if running on testnet
+        if str(getattr(self.config.subtensor, "network", "")).lower() == "test":
+            bt.logging.debug("Testnet detected — skipping remote config refresh.")
+            return
+
         now = time.time()
         if now - self._last_cfg_pull < self._cfg_pull_interval:
             return
@@ -347,6 +353,7 @@ class Validator:
         self.sybil_eligible_hotkeys = set(
             subnet_config.get("sybil_check_eligible_hotkeys") or []
         )
+        self.instant_validation = subnet_config.get("instant_validation", False)
 
         # Emission control
         self.total_miner_emission = float(subnet_config.get("total_miner_emission", 0.0))
@@ -775,9 +782,13 @@ class Validator:
             max_delay = merkle_proof.get("max_random_delay",1200)
 
             # Random delay for PoG
-            delay = random.uniform(0, max_delay)  # Random delay
-            bt.logging.info(f"💻⏳ Scheduled Proof-of-GPU task to start in {delay:.2f} seconds.")
-            await asyncio.sleep(delay)
+            instant = getattr(self, "instant_validation", False)
+            delay = 0 if instant else random.uniform(0, max_delay)
+            if delay > 0:
+                bt.logging.info(f"💻⏳ Scheduled Proof-of-GPU task to start in {delay:.2f} seconds.")
+                await asyncio.sleep(delay)
+            else:
+                bt.logging.info("💻⚡ Instant mode: starting Proof-of-GPU immediately.")
 
             bt.logging.info(f"💻 Starting Proof-of-GPU benchmarking for uids: {list(self._queryable_uids.keys())}")
             # Shared dictionary to store results
@@ -1379,16 +1390,6 @@ class Validator:
                         return None
 
             # -------- transient disconnects / 503 ------------------------------
-            except bt.dendrite.exceptions.ServerDisconnectedError as e:
-                bt.logging.warning(
-                    f"{axon.hotkey}: allocator disconnected "
-                    f"(attempt {attempt}/{MAX_TRIES}) – {e}"
-                )
-                await self.pubsub_client.publish_miner_allocation(
-                    miner_hotkey=axon.hotkey,
-                    allocation_result=False,
-                    allocation_error="Allocator disconnected",
-                )
             except ConnectionRefusedError as e:
                 bt.logging.warning(
                     f"{axon.hotkey}: connection refused "
@@ -2088,6 +2089,16 @@ class Validator:
         block_next_sybil      = 1
 
         bt.logging.info("Starting validator loop.")
+
+        # Instant validation: launch PoG immediately on first startup
+        self._instant_started = getattr(self, "_instant_started", False)
+        if self.instant_validation and not self._instant_started:
+            bt.logging.info("⚡ Instant validation enabled: launching PoG immediately.")
+            if self.gpu_task is None or self.gpu_task.done():
+                self.gpu_task = asyncio.create_task(self.proof_of_gpu())
+                self.gpu_task.add_done_callback(self.on_gpu_task_done)
+            self._instant_started = True
+
         while True:
             try:
                 self.sync_local()

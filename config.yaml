@@ -141,6 +141,7 @@ subnet_config:
   max_challenge_blocks: 11
   rand_delay_blocks_max: 5
   allow_fake_sybil_slot: false
+  instant_validation: false
   sybil_check_eligible_hotkeys:
   - 5GmvyePN9aYErXBBhBnxZKGoGk4LKZApE4NkaSzW62CYCYNA
   gpu_weights:
