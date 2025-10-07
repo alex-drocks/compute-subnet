@@ -400,12 +400,10 @@ def restart_container(public_key: str):
 
     try:
         if ssh_container := get_container(PROD_CONTAINER_NAME):
-            # stop and remove the container by using the SIGTERM signal to PID 1 (init) process in the container
-            if ssh_container.status == "running":
-                ssh_container.stop(timeout=STOP_TIMEOUT)
-                ssh_container.wait(timeout=WAIT_TIMEOUT)
+            # restart and reload the container
             # Restart container
-            ssh_container.restart()
+            ssh_container.restart(timeout=STOP_TIMEOUT)  # this includes stop with kill fallback
+            ssh_container.wait(timeout=WAIT_TIMEOUT)
             # Reload the container to get updated information
             ssh_container.reload()
             if ssh_container.status == "running":
