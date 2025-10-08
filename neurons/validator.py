@@ -54,7 +54,8 @@ from compute.axon import ComputeSubnetSubtensor
 from compute.protocol import Allocate
 from compute.pubsub import PubSubClient
 from compute.utils.db import ComputeDb
-from compute.utils.math import percent
+from compute.utils.ed25519 import generate_ssh_keypair, get_ssh_public_key
+from compute.utils.math import percent, force_to_float_or_default
 from compute.utils.parser import ComputeArgPaser
 from compute.utils.subtensor import is_registered, get_current_block, calculate_next_block_time
 from compute.utils.version import try_update, get_local_version, version2number, get_remote_version
@@ -63,6 +64,7 @@ from neurons.Validator.calculate_pow_score import calc_score_pog
 from neurons.Validator.database.allocate import update_miner_details, get_miner_details
 from neurons.Validator.database.miner import select_miners, purge_miner_entries, update_miners
 from neurons.Validator.health_check import perform_health_check
+from neurons.Validator.template_check import perform_template_check
 from neurons.Validator.pog import prng, adjust_matrix_size, compute_script_hash, execute_script_on_miner, get_random_seeds, load_yaml_config, parse_merkle_output, receive_responses, send_challenge_indices, send_script_and_request_hash, parse_benchmark_output, identify_gpu, send_seeds, verify_merkle_proof_row, get_remote_gpu_info, verify_responses, merkle_ok
 from neurons.Validator.database.pog import get_pog_specs, retrieve_stats, update_pog_stats, write_stats, purge_pog_stats
 
@@ -232,6 +234,10 @@ class Validator:
         self.lock = threading.Lock()
         self.threads: List[threading.Thread] = []
 
+        # Generate ephemeral access key
+        self.ssh_private_key = generate_ssh_keypair()
+        self.ssh_public_key = get_ssh_public_key(self.ssh_private_key)
+
     @staticmethod
     def init_config():
         """
@@ -301,6 +307,12 @@ class Validator:
         Every `_cfg_pull_interval` seconds, fetch the latest JSON config
         from your Streamlit/FastAPI endpoint and re‐apply *all* blocks.
         """
+
+        # Skip remote config refresh if running on testnet
+        if str(getattr(self.config.subtensor, "network", "")).lower() == "test":
+            bt.logging.debug("Testnet detected — skipping remote config refresh.")
+            return
+
         now = time.time()
         if now - self._last_cfg_pull < self._cfg_pull_interval:
             return
@@ -341,6 +353,7 @@ class Validator:
         self.sybil_eligible_hotkeys = set(
             subnet_config.get("sybil_check_eligible_hotkeys") or []
         )
+        self.instant_validation = subnet_config.get("instant_validation", False)
 
         # Emission control
         self.total_miner_emission = float(subnet_config.get("total_miner_emission", 0.0))
@@ -769,9 +782,13 @@ class Validator:
             max_delay = merkle_proof.get("max_random_delay",1200)
 
             # Random delay for PoG
-            delay = random.uniform(0, max_delay)  # Random delay
-            bt.logging.info(f"💻⏳ Scheduled Proof-of-GPU task to start in {delay:.2f} seconds.")
-            await asyncio.sleep(delay)
+            instant = getattr(self, "instant_validation", False)
+            delay = 0 if instant else random.uniform(0, max_delay)
+            if delay > 0:
+                bt.logging.info(f"💻⏳ Scheduled Proof-of-GPU task to start in {delay:.2f} seconds.")
+                await asyncio.sleep(delay)
+            else:
+                bt.logging.info("💻⚡ Instant mode: starting Proof-of-GPU immediately.")
 
             bt.logging.info(f"💻 Starting Proof-of-GPU benchmarking for uids: {list(self._queryable_uids.keys())}")
             # Shared dictionary to store results
@@ -932,7 +949,7 @@ class Validator:
 
             # Step 1: Allocate Miner
             private_key, public_key = rsa.generate_key_pair()
-            allocation_response = await self.allocate_miner(axon, private_key, public_key)
+            allocation_response = await self.allocate_miner(axon, private_key, public_key, self.ssh_public_key)
             if not allocation_response:
                 bt.logging.trace(f"🌀 {hotkey}: Busy or not allocatable.")
                 return (hotkey, None, 0)
@@ -944,15 +961,16 @@ class Validator:
             # Step 2: Connect via SSH
             ssh_client = paramiko.SSHClient()
             ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            bt.logging.trace(f"{hotkey}: Connect to Miner via SSH.")
+            bt.logging.debug(f"{hotkey}: Connect to Miner via SSH.")
             ssh_client.connect(
                 host,
-                port=miner_info.get('port', 22),
-                username=miner_info['username'],
-                password=miner_info['password'],
+                port=miner_info.get('port', 4444),
+                username=miner_info.get('username', 'root'),
+                pkey=self.ssh_private_key,
                 timeout=10,
             )
             if not (ssh_client):
+                # FIXME: I'm suspicious about this check, I don't think it actually works
                 ssh_client.close()
                 bt.logging.trace(f"{hotkey}: SSH connection failed.")
                 return (hotkey, None, -1)
@@ -1065,31 +1083,114 @@ class Validator:
                     if health_check_result:
                         bt.logging.success(f"✅ {hotkey}: Health check passed")
                         bt.logging.trace(f"{hotkey}: [Step 8] Health check completed successfully - miner is accessible")
-                        await self._publish_pog_result_event(
-                            hotkey=hotkey,
-                            request_id=request_id,
-                            start_time=start_time,
-                            result="success",
-                            benchmark_data={
-                                "reported_gpu_number": num_gpus_reported,
-                                "reported_gpu_name": gpu_name_reported,
-                                "vram": vram,
-                                "size_fp16": size_fp16,
-                                "time_fp16": time_fp16,
-                                "size_fp32": size_fp32,
-                                "time_fp32": time_fp32,
-                                "fp16_tflops": fp16_tflops,
-                                "fp32_tflops": fp32_tflops,
-                                "identified_gpu_number": num_gpus,
-                                "identified_gpu_name": gpu_name,
-                                "average_multiplication_time": average_multiplication_time,
-                                "average_merkle_tree_time": average_merkle_tree_time,
-                                "verification_passed": verification_passed,
-                                "timing_passed": timing_passed,
-                            },
-                            health_check_result=health_check_result
-                        )
-                        return (hotkey, gpu_name, num_gpus)
+
+                        # Step 9: Perform template check after successful health check
+                        bt.logging.info(f"🖼️ {hotkey}: Health check passed, starting template availability check...")
+                        bt.logging.trace(f"{hotkey}: [Step 9] Initiating template check...")
+                        try:
+                            # Use Allocate request with checking=True for template verification
+                            template_check_result = await perform_template_check(self.wallet, axon)
+                            if template_check_result.get("success", False):
+                                templates_score = template_check_result.get("templates_score", 0.0)
+                                available_count = len(template_check_result.get("available_templates", []))
+                                total_count = template_check_result.get("total_templates", 0)
+                                bt.logging.success(
+                                    f"✅ {hotkey}: Template check passed - "
+                                    f"{available_count}/{total_count} templates available ({templates_score:.1%})"
+                                )
+                                bt.logging.trace(f"{hotkey}: [Step 9] Template check completed successfully")
+
+                                # Template check passed, publish success event and return
+                                await self._publish_pog_result_event(
+                                    hotkey=hotkey,
+                                    request_id=request_id,
+                                    start_time=start_time,
+                                    result="success",
+                                    benchmark_data={
+                                        "reported_gpu_number": num_gpus_reported,
+                                        "reported_gpu_name": gpu_name_reported,
+                                        "vram": vram,
+                                        "size_fp16": size_fp16,
+                                        "time_fp16": time_fp16,
+                                        "size_fp32": size_fp32,
+                                        "time_fp32": time_fp32,
+                                        "fp16_tflops": fp16_tflops,
+                                        "fp32_tflops": fp32_tflops,
+                                        "identified_gpu_number": num_gpus,
+                                        "identified_gpu_name": gpu_name,
+                                        "average_multiplication_time": average_multiplication_time,
+                                        "average_merkle_tree_time": average_merkle_tree_time,
+                                        "verification_passed": verification_passed,
+                                        "timing_passed": timing_passed,
+                                    },
+                                    health_check_result=health_check_result
+                                )
+                                return (hotkey, gpu_name, num_gpus)
+                            else:
+                                error_msg = template_check_result.get("error_message", "Unknown error")
+                                bt.logging.warning(f"⚠️ {hotkey}: Template check failed - {error_msg}")
+                                bt.logging.trace(f"{hotkey}: [Step 9] Template check failed - {error_msg}")
+                                bt.logging.info(f"⚠️ {hotkey}: GPU Identification: Excluded from dashboard due to template check failure")
+
+                                # Publish POG result with template check failure
+                                await self._publish_pog_result_event(
+                                    hotkey=hotkey,
+                                    request_id=request_id,
+                                    start_time=start_time,
+                                    result="failure",
+                                    error_details=f"Template check failed: {error_msg}",
+                                    health_check_result=health_check_result,
+                                    benchmark_data={
+                                        "reported_gpu_number": num_gpus_reported,
+                                        "reported_gpu_name": gpu_name_reported,
+                                        "vram": vram,
+                                        "size_fp16": size_fp16,
+                                        "time_fp16": time_fp16,
+                                        "size_fp32": size_fp32,
+                                        "time_fp32": time_fp32,
+                                        "fp16_tflops": fp16_tflops,
+                                        "fp32_tflops": fp32_tflops,
+                                        "identified_gpu_number": num_gpus,
+                                        "identified_gpu_name": gpu_name,
+                                        "average_multiplication_time": average_multiplication_time,
+                                        "average_merkle_tree_time": average_merkle_tree_time,
+                                        "verification_passed": verification_passed,
+                                        "timing_passed": timing_passed,
+                                    }
+                                )
+                                return (hotkey, None, -1)  # Use -1 to indicate template check failure
+                        except Exception as template_error:
+                            bt.logging.error(f"❌ {hotkey}: Error during template check: {template_error}")
+                            bt.logging.trace(f"{hotkey}: [Step 9] Template check error: {template_error}")
+                            bt.logging.info(f"⚠️ {hotkey}: GPU Identification: Excluded from dashboard due to template check error")
+
+                            # Publish POG result with template check error
+                            await self._publish_pog_result_event(
+                                hotkey=hotkey,
+                                request_id=request_id,
+                                start_time=start_time,
+                                result="error",
+                                error_details=f"Template check error: {str(template_error)}",
+                                health_check_result=health_check_result,
+                                benchmark_data={
+                                    "reported_gpu_number": num_gpus_reported,
+                                    "reported_gpu_name": gpu_name_reported,
+                                    "vram": vram,
+                                    "size_fp16": size_fp16,
+                                    "time_fp16": time_fp16,
+                                    "size_fp32": size_fp32,
+                                    "time_fp32": time_fp32,
+                                    "fp16_tflops": fp16_tflops,
+                                    "fp32_tflops": fp32_tflops,
+                                    "identified_gpu_number": num_gpus,
+                                    "identified_gpu_name": gpu_name,
+                                    "average_multiplication_time": average_multiplication_time,
+                                    "average_merkle_tree_time": average_merkle_tree_time,
+                                    "verification_passed": verification_passed,
+                                    "timing_passed": timing_passed,
+                                }
+                            )
+                            return (hotkey, None, -1)  # Use -1 to indicate template check error
                     else:
                         bt.logging.debug(f"⚠️ {hotkey}: Health check failed")
                         bt.logging.trace(f"{hotkey}: [Step 8] Health check failed - miner is not accessible")
@@ -1208,11 +1309,12 @@ class Validator:
         axon: bt.AxonInfo,
         private_key: str,
         public_key: str,
+        ssh_public_key: str,
     ) -> dict | None:
         """
         Ask the allocator on ``axon`` for one container and return SSH creds.
 
-        • No preliminary “checking=True” probe – we directly request the slot.
+        • No preliminary "checking=True" probe – we directly request the slot.
         • Retries up to 5× on transient disconnects with linear back-off (1 s, 2 s, 3 s, 4 s).
         • Returns *None* if the miner is busy/declined or all retries fail.
         """
@@ -1225,6 +1327,7 @@ class Validator:
         }
         docker_requirement = {
             "base_image": "pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime",
+            "ssh_key": ssh_public_key,
         }
 
         MAX_TRIES      = 5
@@ -1238,7 +1341,7 @@ class Validator:
                         Allocate(
                             timeline=1,                    # one-shot job
                             device_requirement=device_requirement,
-                            checking=False,               # real allocation
+                            checking=False,            # real allocation
                             public_key=public_key,
                             docker_requirement=docker_requirement,
                         ),
@@ -1287,16 +1390,6 @@ class Validator:
                         return None
 
             # -------- transient disconnects / 503 ------------------------------
-            except bt.dendrite.exceptions.ServerDisconnectedError as e:
-                bt.logging.warning(
-                    f"{axon.hotkey}: allocator disconnected "
-                    f"(attempt {attempt}/{MAX_TRIES}) – {e}"
-                )
-                await self.pubsub_client.publish_miner_allocation(
-                    miner_hotkey=axon.hotkey,
-                    allocation_result=False,
-                    allocation_error="Allocator disconnected",
-                )
             except ConnectionRefusedError as e:
                 bt.logging.warning(
                     f"{axon.hotkey}: connection refused "
@@ -1996,6 +2089,16 @@ class Validator:
         block_next_sybil      = 1
 
         bt.logging.info("Starting validator loop.")
+
+        # Instant validation: launch PoG immediately on first startup
+        self._instant_started = getattr(self, "_instant_started", False)
+        if self.instant_validation and not self._instant_started:
+            bt.logging.info("⚡ Instant validation enabled: launching PoG immediately.")
+            if self.gpu_task is None or self.gpu_task.done():
+                self.gpu_task = asyncio.create_task(self.proof_of_gpu())
+                self.gpu_task.add_done_callback(self.on_gpu_task_done)
+            self._instant_started = True
+
         while True:
             try:
                 self.sync_local()
