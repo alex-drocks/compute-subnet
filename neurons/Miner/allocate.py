@@ -110,7 +110,8 @@ def check_allocation(timeline, device_requirement, return_docker_info=False):
         deployed_container = get_deployed_container_info()
 
         return {
-            "status": allocation_status,
+            "status": allocation_status,  # Whether miner is available for allocation
+            "docker_available": images_result.get("status"),  # Whether Docker query succeeded
             "images": images_result.get("images", []),
             "deployed_container": deployed_container,
             "message": images_result.get("message", "")

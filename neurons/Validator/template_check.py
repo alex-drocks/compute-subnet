@@ -171,7 +171,9 @@ async def perform_template_check(
 
         output = response
 
-        if not output or not output.get("status"):
+        # Check docker_available status (whether Docker query succeeded)
+        # Note: 'status' field indicates allocation availability, not query success
+        if not output or not output.get("docker_available"):
             error_msg = output.get("message", "Unknown error") if output else "Empty response"
             bt.logging.error(f"{hotkey}: Miner error: {error_msg}")
             return {
