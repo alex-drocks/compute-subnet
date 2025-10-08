@@ -695,8 +695,8 @@ class ComputeWandb:
             # Refresh to avoid cached/stale config
             try:
                 run.reload()
-            except Exception:
-                pass
+            except Exception as e:
+                bt.logging.warning(f"Failed to reload run {getattr(run, 'id', None)}: {e}")
 
             rc = run.config
 
