@@ -289,11 +289,6 @@ class Validator:
 
     def init_scores(self):
         self.scores = torch.zeros(len(self.uids), dtype=torch.float32)
-        # Set the weights of validators to zero.
-        self.scores = self.scores * (self.metagraph.total_stake < 1.024e3)
-        # Set the weight to zero for all nodes without assigned IP addresses.
-        self.scores = self.scores * torch.Tensor(self.get_valid_tensors(metagraph=self.metagraph))
-        bt.logging.info(f"🔢 Initialized scores : {self.scores.tolist()}")
         self.sync_scores()
 
     def refresh_config_from_server(self):
@@ -346,6 +341,17 @@ class Validator:
         self.total_miner_emission = float(subnet_config.get("total_miner_emission", 0.0))
         self.gpu_weights = subnet_config.get("gpu_weights", {})
 
+        # Other
+        raw = subnet_config.get("reliability_weight", 0.5)  # 1.0 = full effect, 0.0 = ignore reliability
+        try:
+            self.reliability_weight = float(raw)
+        except Exception:
+            self.reliability_weight = 0.5
+        if self.reliability_weight < 0.0:
+            self.reliability_weight = 0.0
+        elif self.reliability_weight > 1.0:
+            self.reliability_weight = 1.0
+
         bt.logging.debug(f"🔧 Loaded subnet config:")
         bt.logging.debug(f"  total_miner_emission = {self.total_miner_emission}")
 
@@ -388,23 +394,27 @@ class Validator:
             bt.logging.info(f"Error updating wandb : {e}")
 
     def sync_scores(self):
-        # Fetch scoring stats
+        # 1) Fetch local stats from DB and miner details
         self.stats = retrieve_stats(self.db)
         miner_details_all = get_miner_details(self.db)
 
+        # 2) Identify valid validators (used for signature filtering)
         valid_validator_hotkeys = self.get_valid_validator_hotkeys()
 
+        # 3) Publish our current stats to W&B
         self.update_allocation_wandb()
 
-        # Fetch allocated hotkeys and stats
+        # 4) Pull distributed allocation+penalties and the reliability map
         self.allocated_hotkeys = self.wandb.get_allocated_hotkeys(valid_validator_hotkeys, True)
-        self.stats_allocated = self.wandb.get_stats_allocated(valid_validator_hotkeys, True)
-        penalized_hotkeys = self.wandb.get_penalized_hotkeys_checklist(valid_validator_hotkeys, True)
-        self._queryable_uids = self.get_queryable()
+        self.stats_allocated   = self.wandb.get_stats_allocated(valid_validator_hotkeys, True)
+        penalized_hotkeys      = self.wandb.get_penalized_hotkeys_checklist(valid_validator_hotkeys, True)
+        self._queryable_uids   = self.get_queryable()
+        reliability_by_uid = self.wandb.get_reliability_scores()
 
-        # Calculate score
+        # 5) Compute scores per UID
         for uid in self.uids:
             try:
+                # Unqueryable → zero out, clean PoG stats
                 if uid not in self._queryable_uids:
                     hotkey = self.metagraph.axons[uid].hotkey
                     self.stats[uid] = {
@@ -413,116 +423,109 @@ class Validator:
                         "own_score": True,
                         "score": 0,
                         "gpu_specs": None,
-                        "reliability_score": 0.0
-                        }
-                    self.scores[uid] = 0
-
-                    # Remove entry from PoG stats
+                        "reliability_score": self.stats.get(uid, {}).get("reliability_score", 0.0),
+                    }
+                    self.scores[uid] = 0.0
                     cursor = self.db.get_cursor()
-                    cursor.execute(
-                        "DELETE FROM pog_stats WHERE hotkey = ?",
-                        (hotkey,),
-                    )
-                    continue  # Skip further processing for this uid
+                    cursor.execute("DELETE FROM pog_stats WHERE hotkey = ?", (hotkey,))
+                    cursor.close()
+                    continue
 
                 axon = self._queryable_uids[uid]
                 hotkey = axon.hotkey
-
-                if uid not in self.stats:
-                    self.stats[uid] = {}
-
+                self.stats.setdefault(uid, {})
                 self.stats[uid]["hotkey"] = hotkey
-
-                # Mark whether this hotkey is in the allocated list
                 self.stats[uid]["allocated"] = hotkey in self.allocated_hotkeys
 
-                # Check GPU specs in our PoG DB
+                # GPU specs & base score
                 gpu_specs = get_pog_specs(self.db, hotkey)
-
-                # If found in our local database
                 if gpu_specs is not None:
-                    score = calc_score_pog(gpu_specs, hotkey, self.allocated_hotkeys, self.config_data)
-                    self.stats[uid]["own_score"] = True  # or "yes" if you prefer a string
+                    base_score = calc_score_pog(gpu_specs, hotkey, self.allocated_hotkeys, self.config_data)
+                    self.stats[uid]["own_score"] = True
                 else:
-                    # If not found locally, try fallback from stats_allocated
-                    if uid in self.stats_allocated:
-                        if isinstance(self.stats_allocated[uid].get("gpu_specs", None), dict):
-                            gpu_specs = self.stats_allocated[uid].get("gpu_specs", None)
-                            score = self.stats_allocated[uid].get("score", 0)
-                            self.stats[uid]["own_score"] = False
-                        else:
-                            gpu_specs = None
-                            score = 0
-                            self.stats[uid]["own_score"] = True
+                    if uid in self.stats_allocated and isinstance(self.stats_allocated[uid].get("gpu_specs"), dict):
+                        gpu_specs = self.stats_allocated[uid].get("gpu_specs")
+                        base_score = float(self.stats_allocated[uid].get("score", 0.0))
+                        self.stats[uid]["own_score"] = False
                     else:
-                        score = 0
                         gpu_specs = None
+                        base_score = 0.0
                         self.stats[uid]["own_score"] = True
 
-                if (
-                    hotkey in penalized_hotkeys
+                # Penalties / missing miner details force zero
+                if (hotkey in penalized_hotkeys
                     or not isinstance(miner_details_all.get(hotkey), dict)
-                    or not miner_details_all.get(hotkey)
-                ):
-                    score = 0
+                    or not miner_details_all.get(hotkey)):
+                    base_score = 0.0
 
-                self.stats[uid]["score"] = score*100
+                # Reliability score: prefer W&B aggregate, else keep local value, else neutral 1.0
+                rel = reliability_by_uid.get(uid, self.stats[uid].get("reliability_score", 1.0))
+                try:
+                    rel = float(rel)
+                except Exception:
+                    rel = 1.0
+                if rel < 0.0:
+                    rel = 0.0
+                elif rel > 1.0:
+                    rel = 1.0
+                rel_weight = self.reliability_weight
+                rel_multiplier = (1.0 - rel_weight) + (rel_weight * rel)
+
+                # Apply reliability score
+                final_score = float(base_score) * rel_multiplier
+
+                # Store
+                self.stats[uid]["score"] = final_score * 100.0
                 self.stats[uid]["gpu_specs"] = gpu_specs
-
-                # Keep or override reliability_score if you want
-                if "reliability_score" not in self.stats[uid]:
-                    self.stats[uid]["reliability_score"] = 0.0
+                self.stats[uid]["reliability_score"] = rel
+                self.scores[uid] = final_score
 
             except KeyError as e:
                 bt.logging.warning(f"KeyError occurred for UID {uid}: {str(e)}")
-                score = 0
+                self.scores[uid] = 0.0
+                self.stats[uid] = {
+                    "hotkey": self.metagraph.axons[uid].hotkey if uid < len(self.metagraph.axons) else "unknown",
+                    "allocated": False,
+                    "own_score": True,
+                    "score": 0.0,
+                    "gpu_specs": None,
+                    "reliability_score": 0.0,
+                }
             except Exception as e:
-                bt.logging.warning(f"An unexpected exception occurred for UID {uid}: {str(e)}")
-                score = 0
+                bt.logging.warning(f"Unexpected exception for UID {uid}: {str(e)}")
+                self.scores[uid] = 0.0
+                self.stats.setdefault(uid, {})
+                self.stats[uid]["score"] = 0.0
+                self.stats[uid]["reliability_score"] = 0.0
 
-            # Keep a simple reference of scores
-            self.scores[uid] = score
-
+        # 6) Persist and re-push
         write_stats(self.db, self.stats)
-
         self.update_allocation_wandb()
 
+        # 7) Logging
         bt.logging.info("-" * 190)
         bt.logging.info("MINER STATS SUMMARY".center(190))
         bt.logging.info("-" * 190)
-
         for uid, data in self.stats.items():
             hotkey_str = str(data.get("hotkey", "unknown"))
-
-            # Parse GPU specs into a human-readable format
             gpu_specs = data.get("gpu_specs")
             if isinstance(gpu_specs, dict):
                 gpu_name = gpu_specs.get("gpu_name", "Unknown GPU")
                 num_gpus = gpu_specs.get("num_gpus", 0)
                 gpu_str = f"{num_gpus} x {gpu_name}" if num_gpus > 0 else "No GPUs"
             else:
-                gpu_str = "N/A"  # Fallback if gpu_specs is not a dict
-
-            # Format score as a float with 2 decimal digits
-            raw_score = float(data.get("score", 0))
-            score_str = f"{raw_score:.2f}"
-
-            # Retrieve additional fields
+                gpu_str = "N/A"
+            score_str = f"{float(data.get('score', 0.0)):.2f}"
             allocated = "yes" if data.get("allocated", False) else "no"
-            reliability_score = data.get("reliability_score", 0)
+            reliability_score = data.get("reliability_score", 0.0)
             source = "Local" if data.get("own_score", False) else "External"
-
-            # Format the log with fixed-width fields
             log_entry = (
                 f"| UID: {uid:<4} | Hotkey: {hotkey_str:<45} | GPU: {gpu_str:<36} | "
                 f"Score: {score_str:7} | Allocated: {allocated:<5} | "
                 f"RelScore: {reliability_score:<5} | Source: {source:<9} |"
             )
             bt.logging.info(log_entry)
-
-        # Add a closing dashed line
         bt.logging.info("-" * 190)
-
         bt.logging.info(f"🔢 Synced scores : {self.scores.tolist()}")
 
     def sync_local(self):
@@ -1180,7 +1183,7 @@ class Validator:
                 return (hotkey, None, 0)
 
         except Exception as e:
-            bt.logging.debug(f"❌ {hotkey}: Error testing Miner: {e}", exc_info=True)
+            bt.logging.debug(f"❌ {hotkey}: Error testing Miner: {e}", exc_info=False)
             await self._publish_pog_result_event(
                 hotkey=hotkey,
                 request_id=request_id,
