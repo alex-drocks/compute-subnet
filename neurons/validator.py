@@ -1088,7 +1088,7 @@ class Validator:
                         bt.logging.info(f"🖼️ {hotkey}: Health check passed, starting template availability check...")
                         bt.logging.trace(f"{hotkey}: [Step 9] Initiating template check...")
                         try:
-                            # Use Allocate request with docker_info=True for template verification
+                            # Use Allocate request with checking=True for template verification
                             template_check_result = await perform_template_check(self.wallet, axon)
                             if template_check_result.get("success", False):
                                 templates_score = template_check_result.get("templates_score", 0.0)
@@ -1314,7 +1314,7 @@ class Validator:
         """
         Ask the allocator on ``axon`` for one container and return SSH creds.
 
-        • No preliminary "docker_info=True" probe – we directly request the slot.
+        • No preliminary "checking=True" probe – we directly request the slot.
         • Retries up to 5× on transient disconnects with linear back-off (1 s, 2 s, 3 s, 4 s).
         • Returns *None* if the miner is busy/declined or all retries fail.
         """
@@ -1341,7 +1341,7 @@ class Validator:
                         Allocate(
                             timeline=1,                    # one-shot job
                             device_requirement=device_requirement,
-                            docker_info=False,            # real allocation
+                            checking=False,            # real allocation
                             public_key=public_key,
                             docker_requirement=docker_requirement,
                         ),
@@ -1463,7 +1463,7 @@ class Validator:
                             axon,
                             Allocate(
                                 timeline=0,
-                                docker_info=False,
+                                checking=False,
                                 public_key=public_key,
                             ),
                             timeout=15,

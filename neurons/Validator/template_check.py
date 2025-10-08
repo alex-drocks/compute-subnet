@@ -2,7 +2,7 @@
 """
 Template Check Module
 
-This module handles template availability check using Allocate request with docker_info=True.
+This module handles template availability check using Allocate request with checking=True.
 It verifies custom template images availability and validates their digests.
 """
 
@@ -122,7 +122,7 @@ async def perform_template_check(
     axon: bt.AxonInfo
 ) -> dict:
     """
-    Performs template availability check via Allocate request with docker_info=True.
+    Performs template availability check via Allocate request with checking=True.
 
     Args:
         wallet: Wallet instance to create dendrite
@@ -143,7 +143,7 @@ async def perform_template_check(
     hotkey = axon.hotkey
 
     try:
-        bt.logging.debug(f"{hotkey}: Sending Allocate request with docker_info=True for template verification")
+        bt.logging.debug(f"{hotkey}: Sending Allocate request with checking=True for template verification")
 
         async with bt.dendrite(wallet=wallet) as dendrite:
             response = await dendrite(
@@ -151,7 +151,7 @@ async def perform_template_check(
                 Allocate(
                     timeline=1,
                     device_requirement={},
-                    docker_info=True
+                    checking=True
                 ),
                 timeout=30,
             )
