@@ -66,7 +66,7 @@ class Allocate(bt.Synapse):
     Attributes:
     - timeline: The living time of this allocation.
     - device_requirement: Detailed information of device requirements.
-    - checking: Flag that indicates whether it is checking or allocating
+    - checking: Flag that indicates whether to only return Docker info (True) or perform actual allocation (False)
     - public_key: Public key for encryption of data.
     - output: Respond of miner.
     """

@@ -22,7 +22,7 @@ import os
 from io import BytesIO
 
 from compute.utils.exceptions import make_error_response
-from neurons.Miner.container import kill_container, run_container, check_container, check_allocation_key
+from neurons.Miner.container import kill_container, run_container, check_container, check_allocation_key, get_docker_images_list, get_deployed_container_info
 from neurons.Miner.schedule import start
 
 
@@ -97,13 +97,29 @@ def deregister_allocation(public_key):
         )
 
 # Check if miner is acceptable
-def check_allocation(timeline, device_requirement):
+def check_allocation(timeline, device_requirement, return_docker_info=False):
     # Check if miner is already allocated
     if check_container() is True:
-        return {"status": False}
+        allocation_status = False
+    else:
+        allocation_status = True
+
+    # If return_docker_info=True, return Docker images list and deployed container info
+    if return_docker_info:
+        images_result = get_docker_images_list()
+        deployed_container = get_deployed_container_info()
+
+        return {
+            "status": allocation_status,  # Whether miner is available for allocation
+            "docker_available": images_result.get("status"),  # Whether Docker query succeeded
+            "images": images_result.get("images", []),
+            "deployed_container": deployed_container,
+            "message": images_result.get("message", "")
+        }
+
     # Check if there is enough device
     # TODO: if we are downloading a new image we should probably start it here (but we don't pass docker reqs to this)
-    return {"status": True}
+    return {"status": allocation_status}
 
 
 def check_if_allocated(public_key):

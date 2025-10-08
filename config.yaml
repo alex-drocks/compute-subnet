@@ -17,6 +17,7 @@ gpu_performance:
     NVIDIA RTX A5000: 60.0
     NVIDIA RTX A4500: 44.0
     NVIDIA RTX 4000 Ada Generation: 70
+    NVIDIA RTX A4000: 31.2
     NVIDIA A40: 40.0
     NVIDIA GeForce RTX 4090: 157
     NVIDIA GeForce RTX 3090: 66.4
@@ -39,6 +40,7 @@ gpu_performance:
     NVIDIA RTX A5000: 15.8
     NVIDIA RTX A4500: 14.3
     NVIDIA RTX 4000 Ada Generation: 14.6
+    NVIDIA RTX A4000: 10.7
     NVIDIA A40: 22.8
     NVIDIA GeForce RTX 4090: 48.5
     NVIDIA L4: 9
@@ -59,6 +61,7 @@ gpu_performance:
     NVIDIA RTX A5000: 8.59
     NVIDIA RTX A4500: 8.59
     NVIDIA RTX 4000 Ada Generation: 8.59
+    NVIDIA RTX A4000: 8.59
     NVIDIA A40: 17.18
     NVIDIA GeForce RTX 4090: 8.59
     NVIDIA GeForce RTX 3090: 8.59
@@ -100,6 +103,7 @@ gpu_performance:
     NVIDIA L4: 0.43
     NVIDIA RTX A5000: 0.26
     NVIDIA RTX A4500: 0.34
+    NVIDIA RTX A4000: 0.25
 
 # ───────────────── quadratic timing models (+ tolerance) ─────────────────
 gpu_time_models:
@@ -109,6 +113,7 @@ gpu_time_models:
   NVIDIA L4:                          {a0: 13.89, a1: 1.09, a2:  0.00, tol: 1.30}
   NVIDIA A40:                         {a0: 15.12, a1: 2.08, a2: -0.11, tol: 1.30}
   NVIDIA L40:                         {a0: 11.60, a1: 4.96, a2: -0.31, tol: 1.30}
+  NVIDIA RTX 4000:                    {a0: 12.16, a1: 0.36, a2: 0.20, tol: 1.30}
   NVIDIA RTX A4500:                   {a0: 10.86, a1: 0.33, a2:  0.00, tol: 1.30}
   NVIDIA RTX A5000:                   {a0:  6.23, a1: 3.15, a2:  0.00, tol: 1.30}
   NVIDIA RTX A6000:                   {a0:  6.00, a1: 6.38, a2: -0.28, tol: 1.30}
@@ -141,6 +146,7 @@ subnet_config:
   max_challenge_blocks: 11
   rand_delay_blocks_max: 5
   allow_fake_sybil_slot: false
+  instant_validation: false
   sybil_check_eligible_hotkeys:
   - 5GmvyePN9aYErXBBhBnxZKGoGk4LKZApE4NkaSzW62CYCYNA
   gpu_weights:
@@ -160,6 +166,7 @@ subnet_config:
     NVIDIA RTX A5000:               2
     NVIDIA RTX A4500:               2
     NVIDIA RTX 4000 Ada Generation: 1
+    NVIDIA RTX A4000:               1.0
     NVIDIA GeForce RTX 4090:        1
     NVIDIA GeForce RTX 3090:        0.5
     NVIDIA L4:                      0.5

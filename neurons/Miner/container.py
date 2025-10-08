@@ -157,6 +157,31 @@ def run_container(cpu_usage, ram_usage, hard_disk_usage, gpu_usage, public_key, 
             # volumes={ docker_volume: {'bind': '/root/workspace/', 'mode': 'rw'}},
         )
 
+        # Get deployed image digest for validation
+        deployed_image_info = None
+        try:
+            deployed_image = client.images.get(docker_image)
+            repo_digests = deployed_image.attrs.get('RepoDigests', [])
+            digest = None
+            if repo_digests:
+                # Extract digest from format "repository@sha256:..."
+                for repo_digest in repo_digests:
+                    if '@' in repo_digest:
+                        digest = repo_digest.split('@')[1]
+                        break
+
+            deployed_image_info = {
+                "image": docker_image,
+                "digest": digest
+            }
+            bt.logging.trace(f"Deployed image: {docker_image}, digest: {digest}")
+        except Exception as e:
+            bt.logging.warning(f"Failed to get deployed image digest: {e}")
+            deployed_image_info = {
+                "image": docker_image,
+                "digest": None
+            }
+
         # Check the status to determine if the container ran successfully
         if container.status == "created":
             bt.logging.info("Container was created successfully.")
@@ -185,7 +210,12 @@ def run_container(cpu_usage, ram_usage, hard_disk_usage, gpu_usage, public_key, 
             with open(file_path, 'w') as file:
                 file.write(allocation_key)
             message = "Container started successfully."
-            return {"status": True, "info": encrypted_info, "message": message}
+            return {
+                "status": True,
+                "info": encrypted_info,
+                "message": message,
+                "deployed_image": deployed_image_info
+            }
         else:
             return make_error_response(
                 f"Container failed with status: {container.status}",
@@ -229,6 +259,87 @@ def check_container():
     except Exception as e:
         bt.logging.info(f"Error checking container {e}")
         return False
+
+
+def get_deployed_container_info():
+    """
+    Get info about currently deployed container and its image.
+
+    Returns:
+        dict: {
+            "has_container": bool,
+            "container_name": str | None,
+            "deployed_image": {
+                "image": str,
+                "digest": str | None
+            } | None
+        }
+    """
+    try:
+        client = docker.from_env()
+
+        # Check for production container first, then test
+        container = get_container(PROD_CONTAINER_NAME)
+        container_name = PROD_CONTAINER_NAME
+
+        if container is None:
+            container = get_container(TEST_CONTAINER_NAME)
+            container_name = TEST_CONTAINER_NAME
+
+        if container is None:
+            return {
+                "has_container": False,
+                "container_name": None,
+                "deployed_image": None
+            }
+
+        # Get image info from running container
+        image_name = container.image.tags[0] if container.image.tags else None
+
+        if image_name:
+            try:
+                image = client.images.get(image_name)
+                repo_digests = image.attrs.get('RepoDigests', [])
+                digest = None
+
+                if repo_digests:
+                    for repo_digest in repo_digests:
+                        if '@' in repo_digest:
+                            digest = repo_digest.split('@')[1]
+                            break
+
+                return {
+                    "has_container": True,
+                    "container_name": container_name,
+                    "deployed_image": {
+                        "image": image_name,
+                        "digest": digest
+                    }
+                }
+            except Exception as e:
+                bt.logging.warning(f"Error getting deployed image info: {e}")
+                return {
+                    "has_container": True,
+                    "container_name": container_name,
+                    "deployed_image": {
+                        "image": image_name,
+                        "digest": None
+                    }
+                }
+
+        return {
+            "has_container": True,
+            "container_name": container_name,
+            "deployed_image": None
+        }
+
+    except Exception as e:
+        bt.logging.error(f"Error in get_deployed_container_info: {e}")
+        return {
+            "has_container": False,
+            "container_name": None,
+            "deployed_image": None
+        }
 
 
 # Randomly generate password for given length
@@ -414,9 +525,38 @@ def exec_update_container_key(container, new_ssh_key: str, key_type: str = "user
         container.exec_run(cmd=f"bash -c \"echo 'root:!' | chpasswd -e\"")
 
 
+# Custom templates images for pre-pull (from register-api templates)
+CUSTOM_TEMPLATE_IMAGES = [
+    'nirepo/default-pytorch:2.8.0-cuda12.8-cudnn9-runtime',     # default-ubuntu-pytorch
+    'nirepo/ollama-ssh:latest',                                   # ollama-ssh
+    'nirepo/comfyui-ssh:latest',                                 # comfyui-ssh
+    'nirepo/automatic1111-ssh:latest',                           # automatic1111-ssh
+    'nirepo/scientific-ssh:latest',                              # scientific-ssh
+    'nirepo/jupyter-scipy-ssh:latest',                           # jupyter-scipy-ssh
+    'nirepo/jupyter-spark-ssh:latest',                           # jupyter-spark-ssh
+    'nirepo/jupyter-tensorflow-ssh:latest',                      # jupyter-tensorflow-ssh
+]
+
 def pull_default_image():
     api_client = docker.APIClient()
     api_client.pull("nirepo/default-pytorch", tag="2.8.0-cuda12.8-cudnn9-runtime")
+
+def pull_custom_template_images():
+    """Pull all custom template images to avoid timeout during allocation"""
+    bt.logging.info("Starting pre-pull of custom template images...")
+
+    for image in CUSTOM_TEMPLATE_IMAGES:
+        try:
+            bt.logging.info(f"Pulling template image: {image}")
+            result = pull_image(image)
+            if result.get("status"):
+                bt.logging.info(f"Successfully pulled template: {image}")
+            else:
+                bt.logging.warning(f"Failed to pull template {image}: {result}")
+        except Exception as e:
+            bt.logging.warning(f"Error pulling template {image}: {e}")
+
+    bt.logging.info("Finished pre-pulling custom template images")
 
 
 def create_check_container(name="sn27-check-container"):
@@ -448,8 +588,12 @@ def pull_image(image: str = ''):
     name, tag = image.split(':', 1)
     api_client = docker.APIClient()
     try:
-        result = api_client.pull(name, tag=tag, stream=True)
-        message = f"Container image {image} pulled successfully {result}"
+        # Pull the image and consume the stream to actually download it
+        for line in api_client.pull(name, tag=tag, stream=True, decode=True):
+            if 'status' in line:
+                bt.logging.trace(f"Pull {image}: {line['status']}")
+
+        message = f"Container image {image} pulled successfully"
         bt.logging.info(message)
         return {"status": True, "message": message}
     except docker.errors.APIError as e:
@@ -464,3 +608,72 @@ def pull_image(image: str = ''):
             status=False,
             exception=e,
         )
+
+
+def get_docker_images_list() -> dict:
+    """
+    Get list of all Docker images with their RepoDigests using Docker API.
+
+    Returns:
+        dict: {
+            "status": bool,
+            "images": list[dict] with {repository, tag, digest},
+            "message": str
+        }
+    """
+    try:
+        client = docker.from_env()
+        images = client.images.list(all=True)
+
+        images_list = []
+        for image in images:
+            # Get RepoDigests (manifest digests from registry)
+            repo_digests = image.attrs.get('RepoDigests', [])
+
+            # Get image tags
+            tags = image.tags if image.tags else []
+
+            if tags:
+                for tag in tags:
+                    # Parse repository:tag format
+                    if ':' in tag:
+                        repository, image_tag = tag.rsplit(':', 1)
+                    else:
+                        repository = tag
+                        image_tag = 'latest'
+
+                    # Find matching digest for this repo
+                    matching_digest = None
+                    for digest in repo_digests:
+                        if digest.startswith(f"{repository}@"):
+                            matching_digest = digest.split('@')[1]
+                            break
+
+                    images_list.append({
+                        "repository": repository,
+                        "tag": image_tag,
+                        "digest": matching_digest,
+                        "full_name": f"{repository}:{image_tag}"
+                    })
+
+        bt.logging.trace(f"Retrieved {len(images_list)} Docker images with digests")
+        return {
+            "status": True,
+            "images": images_list,
+            "message": f"Successfully retrieved {len(images_list)} images"
+        }
+
+    except docker.errors.DockerException as e:
+        bt.logging.error(f"Docker error while listing images: {e}")
+        return {
+            "status": False,
+            "images": [],
+            "message": f"Docker error: {str(e)}"
+        }
+    except Exception as e:
+        bt.logging.error(f"Error listing Docker images: {e}")
+        return {
+            "status": False,
+            "images": [],
+            "message": f"Error: {str(e)}"
+        }

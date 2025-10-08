@@ -60,6 +60,7 @@ from neurons.Miner.allocate import (
 from neurons.Miner.container import (
     create_check_container,
     pull_default_image,
+    pull_custom_template_images,
     check_container,
     kill_container,
     restart_container,
@@ -155,6 +156,8 @@ class Miner:
 
         # Build sample container image to speed up the allocation process
         pull_default_image()
+        # Pull all custom template images to avoid timeouts during allocation
+        pull_custom_template_images()
         create_check_container()
         has_docker, msg = check_docker_availability()
 
@@ -432,7 +435,7 @@ class Miner:
 
         if checking is True:
             if timeline > 0:  # positive means allocate, negative means deallocate (FIXME: this is weird)
-                result = check_allocation(timeline, device_requirement)
+                result = check_allocation(timeline, device_requirement, return_docker_info=True)
                 synapse.output = result
             else:
                 public_key = synapse.public_key
