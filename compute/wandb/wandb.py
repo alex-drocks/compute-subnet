@@ -5,7 +5,7 @@ import os
 import hashlib
 import json
 from collections import Counter
-
+import math
 from dotenv import load_dotenv
 from compute.utils.db import ComputeDb
 from neurons.Validator.database.pog import retrieve_stats, write_stats
@@ -742,7 +742,7 @@ class ComputeWandb:
                     continue
 
                 # Drop NaNs and clamp to [0,1]
-                if val != val:
+                if math.isnan(val):
                     continue
                 if val < 0.0:
                     val = 0.0
