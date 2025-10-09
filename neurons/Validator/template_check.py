@@ -17,9 +17,11 @@ TEMPLATE_EXPECTED_DIGESTS = {
     'nirepo/comfyui-ssh:latest': 'sha256:312411098589ca6e8b557589f4dcf5be2a2367045f724ffe807befc4bedc14f1',
     'nirepo/automatic1111-ssh:latest': 'sha256:5a6da72aabccd04a897706052191db61876dfdc5461b51feebfb1b61912b5e6a',
     'nirepo/scientific-ssh:latest': 'sha256:40c93cdcba24212a71f9348b65d79ed59f113996eed36711c5cb8d240fbebc7e',
-    'nirepo/jupyter-scipy-ssh:latest': 'sha256:4831abb222b3ac6cdfa17b8d9a6efad10f5555cb5497548b201143e1218a923c',
-    'nirepo/jupyter-spark-ssh:latest': 'sha256:0ea465a32d093670374ffd883a39b45d2835043a0fc5507ad68e4c3838b4242f',
-    'nirepo/jupyter-tensorflow-ssh:latest': 'sha256:a11b46549c4dd26e06c8dd733d5ecfa1384211e6e0964c38420f5021fe5a9f6e',
+    'nirepo/jupyter-scipy-ssh:latest': 'sha256:786f49594c7e1007a20899cea9d5b448d8b22cf45dcefb30a7fa1ff016dfa7b4',
+    'nirepo/jupyter-pytorch-ssh:latest': 'sha256:2fed9f3e0053c939f7351db4e61ede650bec2ab7c696a197132dbec6d057ba9a',
+    'nirepo/jupyter-tensorflow-ssh:latest': 'sha256:7da61da8faf0089b89f3a580d651979673b129e0713566b4f135df714eb6351f',
+    'nirepo/jupyter-spark-ssh:latest': 'sha256:f808b3ce71f4f535ef4e9b6a7e4a379a2b404f0111553a830a30c316185610e6',
+    'nirepo/datascience-ssh:latest': 'sha256:22793d8634946c4c93f99f5382fc7935b9b14d0def8d0e04ba77cbb74bcfe0f5',
 }
 
 
