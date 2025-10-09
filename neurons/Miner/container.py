@@ -536,7 +536,9 @@ CUSTOM_TEMPLATE_IMAGES = [
     'nirepo/scientific-ssh:latest',                              # scientific-ssh
     'nirepo/jupyter-scipy-ssh:latest',                           # jupyter-scipy-ssh
     'nirepo/jupyter-spark-ssh:latest',                           # jupyter-spark-ssh
+    'nirepo/jupyter-pytorch-ssh:latest',                         # jupyter-pytorch-ssh
     'nirepo/jupyter-tensorflow-ssh:latest',                      # jupyter-tensorflow-ssh
+    'nirepo/datascience-ssh:latest',                             # datascience-ssh
 ]
 
 def pull_default_image():
