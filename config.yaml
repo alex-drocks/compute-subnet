@@ -149,6 +149,7 @@ subnet_config:
   instant_validation: false
   sybil_check_eligible_hotkeys:
   - 5GmvyePN9aYErXBBhBnxZKGoGk4LKZApE4NkaSzW62CYCYNA
+  reliability_weight: 0.5
   gpu_weights:
     NVIDIA B200:                    23
     NVIDIA H200:                    19
