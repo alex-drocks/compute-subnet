@@ -357,7 +357,7 @@ class Validator:
         # Treasury configuration
         self.treasury_wallet_hotkey = subnet_config.get("treasury_wallet_hotkey", "")
         self.treasury_emission_share = float(subnet_config.get("treasury_emission_share", 0.0))
-        
+
         # Other
         raw = subnet_config.get("reliability_weight", 0.5)  # 1.0 = full effect, 0.0 = ignore reliability
         try:
