@@ -354,6 +354,10 @@ class Validator:
         self.total_miner_emission = float(subnet_config.get("total_miner_emission", 0.0))
         self.gpu_weights = subnet_config.get("gpu_weights", {})
 
+        # Treasury configuration
+        self.treasury_wallet_hotkey = subnet_config.get("treasury_wallet_hotkey", "")
+        self.treasury_emission_share = float(subnet_config.get("treasury_emission_share", 0.0))
+
         # Other
         raw = subnet_config.get("reliability_weight", 0.5)  # 1.0 = full effect, 0.0 = ignore reliability
         try:
@@ -1558,7 +1562,8 @@ class Validator:
     def set_weight_capped_by_gpu(self):
         """
         Distribute emission weights to miners based on GPU type priorities (normalized),
-        capped by total_miner_emission. Remaining weight is burned.
+        capped by total_miner_emission. From the non-miner remainder (1 - total_miner_emission),
+        allocate treasury_emission_share to the treasury wallet (by hotkey), and burn the rest.
         """
         try:
             # Load config
@@ -1566,8 +1571,17 @@ class Validator:
             total_miner_emission = float(subnet_config.get("total_miner_emission", 0.0))
             gpu_priorities = subnet_config.get("gpu_weights", {})
 
-            # Clamp emission
-            total_miner_emission = min(max(total_miner_emission, 0.0), 1.0)
+            # Treasury params (prefer attributes set by load_subnet_config, fallback to config)
+            treasury_wallet_hotkey = getattr(
+                self, "treasury_wallet_hotkey", subnet_config.get("treasury_wallet_hotkey", "")
+            )
+            treasury_emission_share = float(
+                getattr(self, "treasury_emission_share", subnet_config.get("treasury_emission_share", 0.0))
+            )
+
+            # Clamp emission + treasury share
+            total_miner_emission   = min(max(total_miner_emission, 0.0), 1.0)
+            treasury_emission_share = min(max(treasury_emission_share, 0.0), 1.0)
 
             # Prepare miner data
             uid_to_gpu = {}
@@ -1629,27 +1643,70 @@ class Validator:
                     gpu_actual_emission[gpu_name] = group_cap
                     total_assigned_weight += group_cap
 
-            # Burn the rest
-            burn_uid    = self.get_burn_uid()
-            burn_weight = max(0.0, 1.0 - total_assigned_weight)
+            # Treasury and Burn handling
+            # Non-miner remainder and treasury share from that remainder
+            remainder_non_miners = max(0.0, 1.0 - total_miner_emission)
+            treasury_weight = remainder_non_miners * treasury_emission_share
 
-            if burn_uid in self.uids:
-                # burn UID already among miners → overwrite its slot
-                uids    = self.uids                      # keep original order
-                weights = uid_weights.clone()            # same length
-                idx     = self.uids.index(burn_uid)
+            # Resolve treasury UID from hotkey (if provided)
+            treasury_uid = None
+            if isinstance(treasury_wallet_hotkey, str) and len(treasury_wallet_hotkey) > 0:
+                try:
+                    treasury_uid = self.subtensor.get_uid_for_hotkey_on_subnet(
+                        treasury_wallet_hotkey, self.config.netuid
+                    )
+                    if treasury_uid is None:
+                        bt.logging.info("🏛️  Treasury hotkey not registered on subnet; treasury share will be burned.")
+                    else:
+                        bt.logging.info(f"🏛️  Treasury wallet: hotkey={treasury_wallet_hotkey}, uid={treasury_uid}")
+                except Exception as _e:
+                    bt.logging.error(f"❌ Failed to resolve treasury UID: {_e}")
+                    treasury_uid = None
+            else:
+                if treasury_emission_share > 0.0:
+                    bt.logging.info("🏛️  No treasury hotkey configured; treasury share will be burned.")
+
+            # If treasury UID cannot be used, roll treasury share into burn
+            effective_treasury_weight = treasury_weight if treasury_uid is not None else 0.0
+
+            # Burn = (unused miner allocation) + (non-miner remainder minus treasury)
+            burn_weight = max(0.0, 1.0 - total_assigned_weight - effective_treasury_weight)
+
+            # Build final uids/weights vector with burn + (optional) treasury
+            uids    = list(self.uids)
+            weights = uid_weights.clone()
+
+            # Insert/append burn weight
+            burn_uid = self.get_burn_uid()
+            if burn_uid in uids:
+                idx = uids.index(burn_uid)
                 weights[idx] = burn_weight
                 bt.logging.debug("[Weights] burn_uid overwritten in-place")
             else:
-                # burn UID not present → append it
-                uids    = self.uids + [burn_uid]
-                weights = torch.cat(
-                    [uid_weights, torch.tensor([burn_weight], dtype=torch.float32)]
-                )
+                uids.append(burn_uid)
+                weights = torch.cat([weights, weights.new_tensor([float(burn_weight)])])
                 bt.logging.debug("[Weights] burn_uid appended")
 
+            # Insert/append treasury weight if resolvable
+            if effective_treasury_weight > 0.0 and treasury_uid is not None:
+                if treasury_uid in uids:
+                    idx = uids.index(treasury_uid)
+                    # Add to any existing miner weight for the treasury UID
+                    weights[idx] = weights[idx] + effective_treasury_weight
+                    bt.logging.debug("[Weights] treasury_uid added in-place")
+                else:
+                    uids.append(treasury_uid)
+                    weights = torch.cat([weights, weights.new_tensor([float(effective_treasury_weight)])])
+                    bt.logging.debug("[Weights] treasury_uid appended")
+
             # final normalisation guard
-            weights = weights / weights.sum()
+            s = float(weights.sum().item())
+            if s > 0:
+                weights = weights / s
+            else:
+                # fallback: all to burn
+                uids = [burn_uid]
+                weights = weights.new_tensor([1.0])
 
             # Logging
             # Debug breakdown per GPU
@@ -1660,11 +1717,13 @@ class Validator:
                 percent = cap * 100.0
                 bt.logging.debug(f"   • {gpu_name:<25} {percent:6.2f}%")
 
-            # Burned portion
-            burn_percent = burn_weight * 100.0
+            # Treasury & Burned portions
+            treasury_percent = effective_treasury_weight * 100.0
+            burn_percent     = burn_weight * 100.0
 
             # Totals
             bt.logging.info(f"📈 Total miner emission:       {(total_assigned_weight * 100):6.2f}%")
+            bt.logging.info(f"🏛️  Treasury emission:          {treasury_percent:6.2f}%")
             bt.logging.info(f"🔥 Burned emission:            {burn_percent:6.2f}%")
             bt.logging.info(f"⚙️ Final weights: {weights.tolist()}")
 
@@ -2039,7 +2098,7 @@ class Validator:
             }
 
             # 2) track who actually passed this round
-            passed_hotkeys = set()
+            passed_hotkeys = set(allocated)
             for fut in done:
                 uid, hotkey, ok, gname, gnum = fut.result()
                 if ok:
