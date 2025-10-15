@@ -96,8 +96,8 @@ def deregister_allocation(public_key):
             exception=e,
         )
 
-# Check if miner is available for allocation
-def check_allocation(return_docker_info=False):
+# Check if miner is acceptable
+def check_allocation(timeline, device_requirement, return_docker_info=False):
     # Check if miner is already allocated
     if check_container() is True:
         allocation_status = False
@@ -117,7 +117,8 @@ def check_allocation(return_docker_info=False):
             "message": images_result.get("message", "")
         }
 
-    # Simple availability check
+    # Check if there is enough device
+    # TODO: if we are downloading a new image we should probably start it here (but we don't pass docker reqs to this)
     return {"status": allocation_status}
 
 
