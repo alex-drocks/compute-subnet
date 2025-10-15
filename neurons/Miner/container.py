@@ -253,13 +253,20 @@ def run_container(cpu_usage, ram_usage, hard_disk_usage, gpu_usage, public_key, 
         )
 
 
-# Check if the container exists
+# Check if the container exists and is running
 def check_container():
     try:
-        return (
-            get_container(TEST_CONTAINER_NAME) is not None
-            or get_container(PROD_CONTAINER_NAME) is not None
-        )
+        # Check production container first
+        prod_container = get_container(PROD_CONTAINER_NAME)
+        if prod_container is not None and prod_container.status == "running":
+            return True
+
+        # Check test container
+        test_container = get_container(TEST_CONTAINER_NAME)
+        if test_container is not None and test_container.status == "running":
+            return True
+
+        return False
     except Exception as e:
         bt.logging.info(f"Error checking container {e}")
         return False
