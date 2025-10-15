@@ -155,7 +155,7 @@ async def perform_template_check(
                     device_requirement={},
                     checking=True
                 ),
-                timeout=30,
+                timeout=120,
             )
 
         if not response:
