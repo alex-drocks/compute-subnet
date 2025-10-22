@@ -260,12 +260,10 @@ def create_allocation_ended_message(
     correlation_id: str | None = None,
 ) -> GpuStatusChangePubSubMessage:
     """Create a pub/sub message for when GPU allocation ends."""
-    return factory.create_gpu_status_change(
+    return factory.create_gpu_deallocation(
         miner_hotkey=miner_hotkey,
-        previous_status="allocated",
-        current_status="online",
         allocation_uuid=allocation_uuid,
-        reason=reason,
+        deallocation_reason=reason,
         priority="normal",
         correlation_id=correlation_id,
     )
