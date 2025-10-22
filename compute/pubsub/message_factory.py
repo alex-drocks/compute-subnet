@@ -276,12 +276,14 @@ def create_miner_offline_message(
     miner_hotkey: str,
     reason: str = "miner_disconnected",
     correlation_id: str | None = None,
+    allocation_uuid: str | None = None,
 ) -> GpuStatusChangePubSubMessage:
     """Create a pub/sub message for when miner goes offline."""
     return factory.create_gpu_status_change(
         miner_hotkey=miner_hotkey,
         previous_status="online",
         current_status="offline",
+        allocation_uuid=allocation_uuid,
         reason=reason,
         priority="high",
         correlation_id=correlation_id,
@@ -293,12 +295,14 @@ def create_miner_online_message(
     miner_hotkey: str,
     reason: str = "miner_reconnected",
     correlation_id: str | None = None,
+    allocation_uuid: str | None = None,
 ) -> GpuStatusChangePubSubMessage:
     """Create a pub/sub message for when miner comes online."""
     return factory.create_gpu_status_change(
         miner_hotkey=miner_hotkey,
         previous_status="offline",
         current_status="online",
+        allocation_uuid=allocation_uuid,
         reason=reason,
         priority="normal",
         correlation_id=correlation_id,
