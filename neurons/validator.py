@@ -54,7 +54,8 @@ from compute.axon import ComputeSubnetSubtensor
 from compute.protocol import Allocate
 from compute.pubsub import PubSubClient
 from compute.utils.db import ComputeDb
-from compute.utils.math import percent
+from compute.utils.ed25519 import generate_ssh_keypair, get_ssh_public_key
+from compute.utils.math import percent, force_to_float_or_default
 from compute.utils.parser import ComputeArgPaser
 from compute.utils.subtensor import is_registered, get_current_block, calculate_next_block_time
 from compute.utils.version import try_update, get_local_version, version2number, get_remote_version
@@ -63,6 +64,7 @@ from neurons.Validator.calculate_pow_score import calc_score_pog
 from neurons.Validator.database.allocate import update_miner_details, get_miner_details
 from neurons.Validator.database.miner import select_miners, purge_miner_entries, update_miners
 from neurons.Validator.health_check import perform_health_check
+from neurons.Validator.template_check import perform_template_check
 from neurons.Validator.pog import prng, adjust_matrix_size, compute_script_hash, execute_script_on_miner, get_random_seeds, load_yaml_config, parse_merkle_output, receive_responses, send_challenge_indices, send_script_and_request_hash, parse_benchmark_output, identify_gpu, send_seeds, verify_merkle_proof_row, get_remote_gpu_info, verify_responses, merkle_ok
 from neurons.Validator.database.pog import get_pog_specs, retrieve_stats, update_pog_stats, write_stats, purge_pog_stats
 
@@ -232,6 +234,10 @@ class Validator:
         self.lock = threading.Lock()
         self.threads: List[threading.Thread] = []
 
+        # Generate ephemeral access key
+        self.ssh_private_key = generate_ssh_keypair()
+        self.ssh_public_key = get_ssh_public_key(self.ssh_private_key)
+
     @staticmethod
     def init_config():
         """
@@ -289,11 +295,6 @@ class Validator:
 
     def init_scores(self):
         self.scores = torch.zeros(len(self.uids), dtype=torch.float32)
-        # Set the weights of validators to zero.
-        self.scores = self.scores * (self.metagraph.total_stake < 1.024e3)
-        # Set the weight to zero for all nodes without assigned IP addresses.
-        self.scores = self.scores * torch.Tensor(self.get_valid_tensors(metagraph=self.metagraph))
-        bt.logging.info(f"🔢 Initialized scores : {self.scores.tolist()}")
         self.sync_scores()
 
     def refresh_config_from_server(self):
@@ -301,6 +302,12 @@ class Validator:
         Every `_cfg_pull_interval` seconds, fetch the latest JSON config
         from your Streamlit/FastAPI endpoint and re‐apply *all* blocks.
         """
+
+        # Skip remote config refresh if running on testnet
+        if str(getattr(self.config.subtensor, "network", "")).lower() == "test":
+            bt.logging.debug("Testnet detected — skipping remote config refresh.")
+            return
+
         now = time.time()
         if now - self._last_cfg_pull < self._cfg_pull_interval:
             return
@@ -341,10 +348,26 @@ class Validator:
         self.sybil_eligible_hotkeys = set(
             subnet_config.get("sybil_check_eligible_hotkeys") or []
         )
+        self.instant_validation = subnet_config.get("instant_validation", False)
 
         # Emission control
         self.total_miner_emission = float(subnet_config.get("total_miner_emission", 0.0))
         self.gpu_weights = subnet_config.get("gpu_weights", {})
+
+        # Treasury configuration
+        self.treasury_wallet_hotkey = subnet_config.get("treasury_wallet_hotkey", "")
+        self.treasury_emission_share = float(subnet_config.get("treasury_emission_share", 0.0))
+
+        # Other
+        raw = subnet_config.get("reliability_weight", 0.5)  # 1.0 = full effect, 0.0 = ignore reliability
+        try:
+            self.reliability_weight = float(raw)
+        except Exception:
+            self.reliability_weight = 0.5
+        if self.reliability_weight < 0.0:
+            self.reliability_weight = 0.0
+        elif self.reliability_weight > 1.0:
+            self.reliability_weight = 1.0
 
         bt.logging.debug(f"🔧 Loaded subnet config:")
         bt.logging.debug(f"  total_miner_emission = {self.total_miner_emission}")
@@ -388,23 +411,27 @@ class Validator:
             bt.logging.info(f"Error updating wandb : {e}")
 
     def sync_scores(self):
-        # Fetch scoring stats
+        # 1) Fetch local stats from DB and miner details
         self.stats = retrieve_stats(self.db)
         miner_details_all = get_miner_details(self.db)
 
+        # 2) Identify valid validators (used for signature filtering)
         valid_validator_hotkeys = self.get_valid_validator_hotkeys()
 
+        # 3) Publish our current stats to W&B
         self.update_allocation_wandb()
 
-        # Fetch allocated hotkeys and stats
+        # 4) Pull distributed allocation+penalties and the reliability map
         self.allocated_hotkeys = self.wandb.get_allocated_hotkeys(valid_validator_hotkeys, True)
-        self.stats_allocated = self.wandb.get_stats_allocated(valid_validator_hotkeys, True)
-        penalized_hotkeys = self.wandb.get_penalized_hotkeys_checklist(valid_validator_hotkeys, True)
-        self._queryable_uids = self.get_queryable()
+        self.stats_allocated   = self.wandb.get_stats_allocated(valid_validator_hotkeys, True)
+        penalized_hotkeys      = self.wandb.get_penalized_hotkeys_checklist(valid_validator_hotkeys, True)
+        self._queryable_uids   = self.get_queryable()
+        reliability_by_uid = self.wandb.get_reliability_scores()
 
-        # Calculate score
+        # 5) Compute scores per UID
         for uid in self.uids:
             try:
+                # Unqueryable → zero out, clean PoG stats
                 if uid not in self._queryable_uids:
                     hotkey = self.metagraph.axons[uid].hotkey
                     self.stats[uid] = {
@@ -413,116 +440,109 @@ class Validator:
                         "own_score": True,
                         "score": 0,
                         "gpu_specs": None,
-                        "reliability_score": 0.0
-                        }
-                    self.scores[uid] = 0
-
-                    # Remove entry from PoG stats
+                        "reliability_score": self.stats.get(uid, {}).get("reliability_score", 0.0),
+                    }
+                    self.scores[uid] = 0.0
                     cursor = self.db.get_cursor()
-                    cursor.execute(
-                        "DELETE FROM pog_stats WHERE hotkey = ?",
-                        (hotkey,),
-                    )
-                    continue  # Skip further processing for this uid
+                    cursor.execute("DELETE FROM pog_stats WHERE hotkey = ?", (hotkey,))
+                    cursor.close()
+                    continue
 
                 axon = self._queryable_uids[uid]
                 hotkey = axon.hotkey
-
-                if uid not in self.stats:
-                    self.stats[uid] = {}
-
+                self.stats.setdefault(uid, {})
                 self.stats[uid]["hotkey"] = hotkey
-
-                # Mark whether this hotkey is in the allocated list
                 self.stats[uid]["allocated"] = hotkey in self.allocated_hotkeys
 
-                # Check GPU specs in our PoG DB
+                # GPU specs & base score
                 gpu_specs = get_pog_specs(self.db, hotkey)
-
-                # If found in our local database
                 if gpu_specs is not None:
-                    score = calc_score_pog(gpu_specs, hotkey, self.allocated_hotkeys, self.config_data)
-                    self.stats[uid]["own_score"] = True  # or "yes" if you prefer a string
+                    base_score = calc_score_pog(gpu_specs, hotkey, self.allocated_hotkeys, self.config_data)
+                    self.stats[uid]["own_score"] = True
                 else:
-                    # If not found locally, try fallback from stats_allocated
-                    if uid in self.stats_allocated:
-                        if isinstance(self.stats_allocated[uid].get("gpu_specs", None), dict):
-                            gpu_specs = self.stats_allocated[uid].get("gpu_specs", None)
-                            score = self.stats_allocated[uid].get("score", 0)
-                            self.stats[uid]["own_score"] = False
-                        else:
-                            gpu_specs = None
-                            score = 0
-                            self.stats[uid]["own_score"] = True
+                    if uid in self.stats_allocated and isinstance(self.stats_allocated[uid].get("gpu_specs"), dict):
+                        gpu_specs = self.stats_allocated[uid].get("gpu_specs")
+                        base_score = float(self.stats_allocated[uid].get("score", 0.0))
+                        self.stats[uid]["own_score"] = False
                     else:
-                        score = 0
                         gpu_specs = None
+                        base_score = 0.0
                         self.stats[uid]["own_score"] = True
 
-                if (
-                    hotkey in penalized_hotkeys
+                # Penalties / missing miner details force zero
+                if (hotkey in penalized_hotkeys
                     or not isinstance(miner_details_all.get(hotkey), dict)
-                    or not miner_details_all.get(hotkey)
-                ):
-                    score = 0
+                    or not miner_details_all.get(hotkey)):
+                    base_score = 0.0
 
-                self.stats[uid]["score"] = score*100
+                # Reliability score: prefer W&B aggregate, else keep local value, else neutral 1.0
+                rel = reliability_by_uid.get(uid, self.stats[uid].get("reliability_score", 1.0))
+                try:
+                    rel = float(rel)
+                except Exception:
+                    rel = 1.0
+                if rel < 0.0:
+                    rel = 0.0
+                elif rel > 1.0:
+                    rel = 1.0
+                rel_weight = self.reliability_weight
+                rel_multiplier = (1.0 - rel_weight) + (rel_weight * rel)
+
+                # Apply reliability score
+                final_score = float(base_score) * rel_multiplier
+
+                # Store
+                self.stats[uid]["score"] = final_score * 100.0
                 self.stats[uid]["gpu_specs"] = gpu_specs
-
-                # Keep or override reliability_score if you want
-                if "reliability_score" not in self.stats[uid]:
-                    self.stats[uid]["reliability_score"] = 0.0
+                self.stats[uid]["reliability_score"] = rel
+                self.scores[uid] = final_score
 
             except KeyError as e:
                 bt.logging.warning(f"KeyError occurred for UID {uid}: {str(e)}")
-                score = 0
+                self.scores[uid] = 0.0
+                self.stats[uid] = {
+                    "hotkey": self.metagraph.axons[uid].hotkey if uid < len(self.metagraph.axons) else "unknown",
+                    "allocated": False,
+                    "own_score": True,
+                    "score": 0.0,
+                    "gpu_specs": None,
+                    "reliability_score": 0.0,
+                }
             except Exception as e:
-                bt.logging.warning(f"An unexpected exception occurred for UID {uid}: {str(e)}")
-                score = 0
+                bt.logging.warning(f"Unexpected exception for UID {uid}: {str(e)}")
+                self.scores[uid] = 0.0
+                self.stats.setdefault(uid, {})
+                self.stats[uid]["score"] = 0.0
+                self.stats[uid]["reliability_score"] = 0.0
 
-            # Keep a simple reference of scores
-            self.scores[uid] = score
-
+        # 6) Persist and re-push
         write_stats(self.db, self.stats)
-
         self.update_allocation_wandb()
 
+        # 7) Logging
         bt.logging.info("-" * 190)
         bt.logging.info("MINER STATS SUMMARY".center(190))
         bt.logging.info("-" * 190)
-
         for uid, data in self.stats.items():
             hotkey_str = str(data.get("hotkey", "unknown"))
-
-            # Parse GPU specs into a human-readable format
             gpu_specs = data.get("gpu_specs")
             if isinstance(gpu_specs, dict):
                 gpu_name = gpu_specs.get("gpu_name", "Unknown GPU")
                 num_gpus = gpu_specs.get("num_gpus", 0)
                 gpu_str = f"{num_gpus} x {gpu_name}" if num_gpus > 0 else "No GPUs"
             else:
-                gpu_str = "N/A"  # Fallback if gpu_specs is not a dict
-
-            # Format score as a float with 2 decimal digits
-            raw_score = float(data.get("score", 0))
-            score_str = f"{raw_score:.2f}"
-
-            # Retrieve additional fields
+                gpu_str = "N/A"
+            score_str = f"{float(data.get('score', 0.0)):.2f}"
             allocated = "yes" if data.get("allocated", False) else "no"
-            reliability_score = data.get("reliability_score", 0)
+            reliability_score = data.get("reliability_score", 0.0)
             source = "Local" if data.get("own_score", False) else "External"
-
-            # Format the log with fixed-width fields
             log_entry = (
                 f"| UID: {uid:<4} | Hotkey: {hotkey_str:<45} | GPU: {gpu_str:<36} | "
                 f"Score: {score_str:7} | Allocated: {allocated:<5} | "
                 f"RelScore: {reliability_score:<5} | Source: {source:<9} |"
             )
             bt.logging.info(log_entry)
-
-        # Add a closing dashed line
         bt.logging.info("-" * 190)
-
         bt.logging.info(f"🔢 Synced scores : {self.scores.tolist()}")
 
     def sync_local(self):
@@ -769,9 +789,13 @@ class Validator:
             max_delay = merkle_proof.get("max_random_delay",1200)
 
             # Random delay for PoG
-            delay = random.uniform(0, max_delay)  # Random delay
-            bt.logging.info(f"💻⏳ Scheduled Proof-of-GPU task to start in {delay:.2f} seconds.")
-            await asyncio.sleep(delay)
+            instant = getattr(self, "instant_validation", False)
+            delay = 0 if instant else random.uniform(0, max_delay)
+            if delay > 0:
+                bt.logging.info(f"💻⏳ Scheduled Proof-of-GPU task to start in {delay:.2f} seconds.")
+                await asyncio.sleep(delay)
+            else:
+                bt.logging.info("💻⚡ Instant mode: starting Proof-of-GPU immediately.")
 
             bt.logging.info(f"💻 Starting Proof-of-GPU benchmarking for uids: {list(self._queryable_uids.keys())}")
             # Shared dictionary to store results
@@ -932,7 +956,7 @@ class Validator:
 
             # Step 1: Allocate Miner
             private_key, public_key = rsa.generate_key_pair()
-            allocation_response = await self.allocate_miner(axon, private_key, public_key)
+            allocation_response = await self.allocate_miner(axon, private_key, public_key, self.ssh_public_key)
             if not allocation_response:
                 bt.logging.trace(f"🌀 {hotkey}: Busy or not allocatable.")
                 return (hotkey, None, 0)
@@ -944,15 +968,16 @@ class Validator:
             # Step 2: Connect via SSH
             ssh_client = paramiko.SSHClient()
             ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            bt.logging.trace(f"{hotkey}: Connect to Miner via SSH.")
+            bt.logging.debug(f"{hotkey}: Connect to Miner via SSH.")
             ssh_client.connect(
                 host,
-                port=miner_info.get('port', 22),
-                username=miner_info['username'],
-                password=miner_info['password'],
+                port=miner_info.get('port', 4444),
+                username=miner_info.get('username', 'root'),
+                pkey=self.ssh_private_key,
                 timeout=10,
             )
             if not (ssh_client):
+                # FIXME: I'm suspicious about this check, I don't think it actually works
                 ssh_client.close()
                 bt.logging.trace(f"{hotkey}: SSH connection failed.")
                 return (hotkey, None, -1)
@@ -1065,31 +1090,114 @@ class Validator:
                     if health_check_result:
                         bt.logging.success(f"✅ {hotkey}: Health check passed")
                         bt.logging.trace(f"{hotkey}: [Step 8] Health check completed successfully - miner is accessible")
-                        await self._publish_pog_result_event(
-                            hotkey=hotkey,
-                            request_id=request_id,
-                            start_time=start_time,
-                            result="success",
-                            benchmark_data={
-                                "reported_gpu_number": num_gpus_reported,
-                                "reported_gpu_name": gpu_name_reported,
-                                "vram": vram,
-                                "size_fp16": size_fp16,
-                                "time_fp16": time_fp16,
-                                "size_fp32": size_fp32,
-                                "time_fp32": time_fp32,
-                                "fp16_tflops": fp16_tflops,
-                                "fp32_tflops": fp32_tflops,
-                                "identified_gpu_number": num_gpus,
-                                "identified_gpu_name": gpu_name,
-                                "average_multiplication_time": average_multiplication_time,
-                                "average_merkle_tree_time": average_merkle_tree_time,
-                                "verification_passed": verification_passed,
-                                "timing_passed": timing_passed,
-                            },
-                            health_check_result=health_check_result
-                        )
-                        return (hotkey, gpu_name, num_gpus)
+
+                        # Step 9: Perform template check after successful health check
+                        bt.logging.info(f"🖼️ {hotkey}: Health check passed, starting template availability check...")
+                        bt.logging.trace(f"{hotkey}: [Step 9] Initiating template check...")
+                        try:
+                            # Use Allocate request with checking=True for template verification
+                            template_check_result = await perform_template_check(self.wallet, axon)
+                            if template_check_result.get("success", False):
+                                templates_score = template_check_result.get("templates_score", 0.0)
+                                available_count = len(template_check_result.get("available_templates", []))
+                                total_count = template_check_result.get("total_templates", 0)
+                                bt.logging.success(
+                                    f"✅ {hotkey}: Template check passed - "
+                                    f"{available_count}/{total_count} templates available ({templates_score:.1%})"
+                                )
+                                bt.logging.trace(f"{hotkey}: [Step 9] Template check completed successfully")
+
+                                # Template check passed, publish success event and return
+                                await self._publish_pog_result_event(
+                                    hotkey=hotkey,
+                                    request_id=request_id,
+                                    start_time=start_time,
+                                    result="success",
+                                    benchmark_data={
+                                        "reported_gpu_number": num_gpus_reported,
+                                        "reported_gpu_name": gpu_name_reported,
+                                        "vram": vram,
+                                        "size_fp16": size_fp16,
+                                        "time_fp16": time_fp16,
+                                        "size_fp32": size_fp32,
+                                        "time_fp32": time_fp32,
+                                        "fp16_tflops": fp16_tflops,
+                                        "fp32_tflops": fp32_tflops,
+                                        "identified_gpu_number": num_gpus,
+                                        "identified_gpu_name": gpu_name,
+                                        "average_multiplication_time": average_multiplication_time,
+                                        "average_merkle_tree_time": average_merkle_tree_time,
+                                        "verification_passed": verification_passed,
+                                        "timing_passed": timing_passed,
+                                    },
+                                    health_check_result=health_check_result
+                                )
+                                return (hotkey, gpu_name, num_gpus)
+                            else:
+                                error_msg = template_check_result.get("error_message", "Unknown error")
+                                bt.logging.warning(f"⚠️ {hotkey}: Template check failed - {error_msg}")
+                                bt.logging.trace(f"{hotkey}: [Step 9] Template check failed - {error_msg}")
+                                bt.logging.info(f"⚠️ {hotkey}: GPU Identification: Excluded from dashboard due to template check failure")
+
+                                # Publish POG result with template check failure
+                                await self._publish_pog_result_event(
+                                    hotkey=hotkey,
+                                    request_id=request_id,
+                                    start_time=start_time,
+                                    result="failure",
+                                    error_details=f"Template check failed: {error_msg}",
+                                    health_check_result=health_check_result,
+                                    benchmark_data={
+                                        "reported_gpu_number": num_gpus_reported,
+                                        "reported_gpu_name": gpu_name_reported,
+                                        "vram": vram,
+                                        "size_fp16": size_fp16,
+                                        "time_fp16": time_fp16,
+                                        "size_fp32": size_fp32,
+                                        "time_fp32": time_fp32,
+                                        "fp16_tflops": fp16_tflops,
+                                        "fp32_tflops": fp32_tflops,
+                                        "identified_gpu_number": num_gpus,
+                                        "identified_gpu_name": gpu_name,
+                                        "average_multiplication_time": average_multiplication_time,
+                                        "average_merkle_tree_time": average_merkle_tree_time,
+                                        "verification_passed": verification_passed,
+                                        "timing_passed": timing_passed,
+                                    }
+                                )
+                                return (hotkey, None, -1)  # Use -1 to indicate template check failure
+                        except Exception as template_error:
+                            bt.logging.error(f"❌ {hotkey}: Error during template check: {template_error}")
+                            bt.logging.trace(f"{hotkey}: [Step 9] Template check error: {template_error}")
+                            bt.logging.info(f"⚠️ {hotkey}: GPU Identification: Excluded from dashboard due to template check error")
+
+                            # Publish POG result with template check error
+                            await self._publish_pog_result_event(
+                                hotkey=hotkey,
+                                request_id=request_id,
+                                start_time=start_time,
+                                result="error",
+                                error_details=f"Template check error: {str(template_error)}",
+                                health_check_result=health_check_result,
+                                benchmark_data={
+                                    "reported_gpu_number": num_gpus_reported,
+                                    "reported_gpu_name": gpu_name_reported,
+                                    "vram": vram,
+                                    "size_fp16": size_fp16,
+                                    "time_fp16": time_fp16,
+                                    "size_fp32": size_fp32,
+                                    "time_fp32": time_fp32,
+                                    "fp16_tflops": fp16_tflops,
+                                    "fp32_tflops": fp32_tflops,
+                                    "identified_gpu_number": num_gpus,
+                                    "identified_gpu_name": gpu_name,
+                                    "average_multiplication_time": average_multiplication_time,
+                                    "average_merkle_tree_time": average_merkle_tree_time,
+                                    "verification_passed": verification_passed,
+                                    "timing_passed": timing_passed,
+                                }
+                            )
+                            return (hotkey, None, -1)  # Use -1 to indicate template check error
                     else:
                         bt.logging.debug(f"⚠️ {hotkey}: Health check failed")
                         bt.logging.trace(f"{hotkey}: [Step 8] Health check failed - miner is not accessible")
@@ -1180,7 +1288,7 @@ class Validator:
                 return (hotkey, None, 0)
 
         except Exception as e:
-            bt.logging.debug(f"❌ {hotkey}: Error testing Miner: {e}", exc_info=True)
+            bt.logging.debug(f"❌ {hotkey}: Error testing Miner: {e}", exc_info=False)
             await self._publish_pog_result_event(
                 hotkey=hotkey,
                 request_id=request_id,
@@ -1208,11 +1316,12 @@ class Validator:
         axon: bt.AxonInfo,
         private_key: str,
         public_key: str,
+        ssh_public_key: str,
     ) -> dict | None:
         """
         Ask the allocator on ``axon`` for one container and return SSH creds.
 
-        • No preliminary “checking=True” probe – we directly request the slot.
+        • No preliminary "checking=True" probe – we directly request the slot.
         • Retries up to 5× on transient disconnects with linear back-off (1 s, 2 s, 3 s, 4 s).
         • Returns *None* if the miner is busy/declined or all retries fail.
         """
@@ -1225,6 +1334,7 @@ class Validator:
         }
         docker_requirement = {
             "base_image": "pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime",
+            "ssh_key": ssh_public_key,
         }
 
         MAX_TRIES      = 5
@@ -1238,7 +1348,7 @@ class Validator:
                         Allocate(
                             timeline=1,                    # one-shot job
                             device_requirement=device_requirement,
-                            checking=False,               # real allocation
+                            checking=False,            # real allocation
                             public_key=public_key,
                             docker_requirement=docker_requirement,
                         ),
@@ -1287,16 +1397,6 @@ class Validator:
                         return None
 
             # -------- transient disconnects / 503 ------------------------------
-            except bt.dendrite.exceptions.ServerDisconnectedError as e:
-                bt.logging.warning(
-                    f"{axon.hotkey}: allocator disconnected "
-                    f"(attempt {attempt}/{MAX_TRIES}) – {e}"
-                )
-                await self.pubsub_client.publish_miner_allocation(
-                    miner_hotkey=axon.hotkey,
-                    allocation_result=False,
-                    allocation_error="Allocator disconnected",
-                )
             except ConnectionRefusedError as e:
                 bt.logging.warning(
                     f"{axon.hotkey}: connection refused "
@@ -1462,7 +1562,8 @@ class Validator:
     def set_weight_capped_by_gpu(self):
         """
         Distribute emission weights to miners based on GPU type priorities (normalized),
-        capped by total_miner_emission. Remaining weight is burned.
+        capped by total_miner_emission. From the non-miner remainder (1 - total_miner_emission),
+        allocate treasury_emission_share to the treasury wallet (by hotkey), and burn the rest.
         """
         try:
             # Load config
@@ -1470,8 +1571,17 @@ class Validator:
             total_miner_emission = float(subnet_config.get("total_miner_emission", 0.0))
             gpu_priorities = subnet_config.get("gpu_weights", {})
 
-            # Clamp emission
-            total_miner_emission = min(max(total_miner_emission, 0.0), 1.0)
+            # Treasury params (prefer attributes set by load_subnet_config, fallback to config)
+            treasury_wallet_hotkey = getattr(
+                self, "treasury_wallet_hotkey", subnet_config.get("treasury_wallet_hotkey", "")
+            )
+            treasury_emission_share = float(
+                getattr(self, "treasury_emission_share", subnet_config.get("treasury_emission_share", 0.0))
+            )
+
+            # Clamp emission + treasury share
+            total_miner_emission   = min(max(total_miner_emission, 0.0), 1.0)
+            treasury_emission_share = min(max(treasury_emission_share, 0.0), 1.0)
 
             # Prepare miner data
             uid_to_gpu = {}
@@ -1533,27 +1643,70 @@ class Validator:
                     gpu_actual_emission[gpu_name] = group_cap
                     total_assigned_weight += group_cap
 
-            # Burn the rest
-            burn_uid    = self.get_burn_uid()
-            burn_weight = max(0.0, 1.0 - total_assigned_weight)
+            # Treasury and Burn handling
+            # Non-miner remainder and treasury share from that remainder
+            remainder_non_miners = max(0.0, 1.0 - total_miner_emission)
+            treasury_weight = remainder_non_miners * treasury_emission_share
 
-            if burn_uid in self.uids:
-                # burn UID already among miners → overwrite its slot
-                uids    = self.uids                      # keep original order
-                weights = uid_weights.clone()            # same length
-                idx     = self.uids.index(burn_uid)
+            # Resolve treasury UID from hotkey (if provided)
+            treasury_uid = None
+            if isinstance(treasury_wallet_hotkey, str) and len(treasury_wallet_hotkey) > 0:
+                try:
+                    treasury_uid = self.subtensor.get_uid_for_hotkey_on_subnet(
+                        treasury_wallet_hotkey, self.config.netuid
+                    )
+                    if treasury_uid is None:
+                        bt.logging.info("🏛️  Treasury hotkey not registered on subnet; treasury share will be burned.")
+                    else:
+                        bt.logging.info(f"🏛️  Treasury wallet: hotkey={treasury_wallet_hotkey}, uid={treasury_uid}")
+                except Exception as _e:
+                    bt.logging.error(f"❌ Failed to resolve treasury UID: {_e}")
+                    treasury_uid = None
+            else:
+                if treasury_emission_share > 0.0:
+                    bt.logging.info("🏛️  No treasury hotkey configured; treasury share will be burned.")
+
+            # If treasury UID cannot be used, roll treasury share into burn
+            effective_treasury_weight = treasury_weight if treasury_uid is not None else 0.0
+
+            # Burn = (unused miner allocation) + (non-miner remainder minus treasury)
+            burn_weight = max(0.0, 1.0 - total_assigned_weight - effective_treasury_weight)
+
+            # Build final uids/weights vector with burn + (optional) treasury
+            uids    = list(self.uids)
+            weights = uid_weights.clone()
+
+            # Insert/append burn weight
+            burn_uid = self.get_burn_uid()
+            if burn_uid in uids:
+                idx = uids.index(burn_uid)
                 weights[idx] = burn_weight
                 bt.logging.debug("[Weights] burn_uid overwritten in-place")
             else:
-                # burn UID not present → append it
-                uids    = self.uids + [burn_uid]
-                weights = torch.cat(
-                    [uid_weights, torch.tensor([burn_weight], dtype=torch.float32)]
-                )
+                uids.append(burn_uid)
+                weights = torch.cat([weights, weights.new_tensor([float(burn_weight)])])
                 bt.logging.debug("[Weights] burn_uid appended")
 
+            # Insert/append treasury weight if resolvable
+            if effective_treasury_weight > 0.0 and treasury_uid is not None:
+                if treasury_uid in uids:
+                    idx = uids.index(treasury_uid)
+                    # Add to any existing miner weight for the treasury UID
+                    weights[idx] = weights[idx] + effective_treasury_weight
+                    bt.logging.debug("[Weights] treasury_uid added in-place")
+                else:
+                    uids.append(treasury_uid)
+                    weights = torch.cat([weights, weights.new_tensor([float(effective_treasury_weight)])])
+                    bt.logging.debug("[Weights] treasury_uid appended")
+
             # final normalisation guard
-            weights = weights / weights.sum()
+            s = float(weights.sum().item())
+            if s > 0:
+                weights = weights / s
+            else:
+                # fallback: all to burn
+                uids = [burn_uid]
+                weights = weights.new_tensor([1.0])
 
             # Logging
             # Debug breakdown per GPU
@@ -1564,11 +1717,13 @@ class Validator:
                 percent = cap * 100.0
                 bt.logging.debug(f"   • {gpu_name:<25} {percent:6.2f}%")
 
-            # Burned portion
-            burn_percent = burn_weight * 100.0
+            # Treasury & Burned portions
+            treasury_percent = effective_treasury_weight * 100.0
+            burn_percent     = burn_weight * 100.0
 
             # Totals
             bt.logging.info(f"📈 Total miner emission:       {(total_assigned_weight * 100):6.2f}%")
+            bt.logging.info(f"🏛️  Treasury emission:          {treasury_percent:6.2f}%")
             bt.logging.info(f"🔥 Burned emission:            {burn_percent:6.2f}%")
             bt.logging.info(f"⚙️ Final weights: {weights.tolist()}")
 
@@ -1943,7 +2098,7 @@ class Validator:
             }
 
             # 2) track who actually passed this round
-            passed_hotkeys = set()
+            passed_hotkeys = set(allocated)
             for fut in done:
                 uid, hotkey, ok, gname, gnum = fut.result()
                 if ok:
@@ -1996,6 +2151,16 @@ class Validator:
         block_next_sybil      = 1
 
         bt.logging.info("Starting validator loop.")
+
+        # Instant validation: launch PoG immediately on first startup
+        self._instant_started = getattr(self, "_instant_started", False)
+        if self.instant_validation and not self._instant_started:
+            bt.logging.info("⚡ Instant validation enabled: launching PoG immediately.")
+            if self.gpu_task is None or self.gpu_task.done():
+                self.gpu_task = asyncio.create_task(self.proof_of_gpu())
+                self.gpu_task.add_done_callback(self.on_gpu_task_done)
+            self._instant_started = True
+
         while True:
             try:
                 self.sync_local()

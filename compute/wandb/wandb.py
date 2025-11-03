@@ -5,7 +5,7 @@ import os
 import hashlib
 import json
 from collections import Counter
-
+import math
 from dotenv import load_dotenv
 from compute.utils.db import ComputeDb
 from neurons.Validator.database.pog import retrieve_stats, write_stats
@@ -14,6 +14,7 @@ from compute import __version_as_int__
 
 PUBLIC_WANDB_NAME = "opencompute"
 PUBLIC_WANDB_ENTITY = "neuralinternet"
+NEURALINTERNET_VALIDATOR_RUN = f"{PUBLIC_WANDB_ENTITY}/{PUBLIC_WANDB_NAME}/0djlnjjs"
 
 
 class ComputeWandb:
@@ -391,7 +392,18 @@ class ComputeWandb:
         Then picks one 'dominant' entry per UID and preserves all fields (e.g., allocated).
         """
 
-        # ——— 1) fetch all validator runs that have stats ——————————————
+        # helper: get gpu name/num from either 'gpu_specs' or top-level
+        def _gpu_name_num(entry: dict):
+            specs = entry.get("gpu_specs") or {}
+            name = specs.get("gpu_name")
+            num  = specs.get("gpu_num")
+            if name is None:
+                name = entry.get("gpu_name", "N/A")
+            if num is None:
+                num = entry.get("gpu_num", 0)
+            return name, num
+
+        # 1) fetch all validator runs that have stats
         self.api.flush()
         validator_runs = self.api.runs(
             path=f"{PUBLIC_WANDB_ENTITY}/{PUBLIC_WANDB_NAME}",
@@ -431,19 +443,19 @@ class ComputeWandb:
                 for uid_str, entry in stats_data.items():
                     if entry.get("own_score") and entry.get("score", 0) > 0 and entry.get("allocated"):
                         aggregator.setdefault(uid_str, []).append(entry)
-                        specs = entry.get("gpu_specs") or {}
+                        gname, gnum = _gpu_name_num(entry)
                         bt.logging.trace(
                             f"Added stats for UID {uid_str} from {hotkey} | "
-                            f"GPU: {specs.get('gpu_name','N/A')} x {specs.get('gpu_num',0)}"
+                            f"GPU: {gname} x {gnum}"
                         )
 
             except Exception as e:
                 bt.logging.info(f"Run ID: {run.id}, Name: {run.name}, Error: {e}")
 
-        # ——— 2) helper to pick the “dominant” entry per UID ——————————————
+        # 2) helper to pick the “dominant” entry per UID
         def pick_dominant(valid_entries: list[dict]) -> dict:
             combos = [
-                (d["gpu_specs"].get("gpu_name"), d["gpu_specs"].get("gpu_num"), d["score"])
+                (*_gpu_name_num(d), d["score"])
                 for d in valid_entries
             ]
             counts = Counter(combos)
@@ -455,13 +467,11 @@ class ComputeWandb:
             if len(top_ties) > 1:
                 top_combo = max(top_ties, key=lambda t: t[2])
             for d in valid_entries:
-                if (d["gpu_specs"].get("gpu_name"),
-                    d["gpu_specs"].get("gpu_num"),
-                    d["score"]) == top_combo:
+                if (*_gpu_name_num(d), d["score"]) == top_combo:
                     d["own_score"] = True
                     return d
 
-        # ——— 3) pick one per UID, convert UID to int ——————————————
+        # 3) pick one per UID, convert UID to int
         final: dict[int, dict] = {}
         for uid_str, entries in aggregator.items():
             valid_entries = [e for e in entries if e.get("score", 0) != 0]
@@ -668,3 +678,81 @@ class ComputeWandb:
         except Exception as e:
             bt.logging.info(f"Run ID: {run.id}, Name: {run.name}, Error: {e}")
             return []
+
+    def get_reliability_scores(self) -> dict[int, float]:
+        """
+        Reads reliability_score per UID from the single authoritative validator run.
+        Returns {uid: reliability_score} with values clamped to [0, 1].
+        """
+        self.api.flush()
+        run_path = NEURALINTERNET_VALIDATOR_RUN
+        try:
+            run = self.api.run(run_path)
+            if not run:
+                bt.logging.info(f"No run info found for path {run_path}.")
+                return {}
+
+            # Refresh to avoid cached/stale config
+            try:
+                run.reload()
+            except Exception as e:
+                bt.logging.warning(f"Failed to reload run {getattr(run, 'id', None)}: {e}")
+
+            rc = run.config
+
+            # Verify the signature for authenticity
+            if not self.verify_run(run):
+                bt.logging.info(f"Signature verification failed for {run_path}.")
+                return {}
+
+            stats_data = rc.get("stats", {})
+
+            # Parse if returned as JSON string
+            if isinstance(stats_data, str):
+                try:
+                    stats_data = json.loads(stats_data)
+                except Exception as e:
+                    bt.logging.info(f"Could not parse stats JSON for run {run.id}: {e}")
+                    return {}
+
+            if not isinstance(stats_data, dict):
+                return {}
+
+            out: dict[int, float] = {}
+            for uid_str, entry in stats_data.items():
+                if not isinstance(entry, dict):
+                    continue
+
+                # Resolve UID from key or entry["uid"]
+                try:
+                    uid = int(uid_str)
+                except Exception:
+                    try:
+                        uid = int(entry.get("uid"))
+                    except Exception:
+                        continue
+
+                r = entry.get("reliability_score")
+                if r is None:
+                    continue
+
+                try:
+                    val = float(r)
+                except Exception:
+                    continue
+
+                # Drop NaNs and clamp to [0,1]
+                if math.isnan(val):
+                    continue
+                if val < 0.0:
+                    val = 0.0
+                elif val > 1.0:
+                    val = 1.0
+
+                out[uid] = val
+
+            return out
+
+        except Exception as e:
+            bt.logging.warning(f"Run fetch error for {run_path}: {e}")
+            return {}
