@@ -122,8 +122,8 @@ def run_container(cpu_usage, ram_usage, hard_disk_usage, gpu_usage, public_key, 
         docker_image = docker_requirement.get("image") or "nirepo/default-pytorch:2.8.0-cuda12.8-cudnn9-runtime"
         docker_env = docker_requirement.get("env", {})
         docker_env["NVIDIA_VISIBLE_DEVICES"] = "all"  # will need adjustment for fractional allcoations
-        docker_internal_ports = docker_requirement.get("internal_ports", {"ssh": 22, "external": 27015})
-        docker_external_ports = docker_requirement.get("external_ports", {"ssh": 4444, "external": 27015})
+        docker_internal_ports = docker_requirement.get("internal_ports", {"ssh": 22})
+        docker_external_ports = docker_requirement.get("external_ports", {"ssh": 4444})
         # now let's map the two dict onto each other e.g. {22: 4444}
         ports_mapping = {
             v: docker_external_ports[k]
@@ -204,7 +204,7 @@ def run_container(cpu_usage, ram_usage, hard_disk_usage, gpu_usage, public_key, 
                     "username": "root",
                     "password": password,
                     "port": docker_external_ports["ssh"],
-                    "fixed_external_user_port": docker_external_ports.get("external"),
+                    "external_user_ports": external_user_ports,
                     "version": __version_as_int__
             }
             info_str = json.dumps(info)

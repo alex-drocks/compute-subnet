@@ -79,8 +79,8 @@ class Allocate(bt.Synapse):
     docker_requirement: dict = {
         "image": "nirepo/default-pytorch:2.8.0-cuda12.8-cudnn9-runtime",
         "env": {},
-        "internal_ports": {"ssh": 22, "external": 27015},  # overridden by templates
-        "external_ports": {"ssh": 4444, "external": 27015},  # Default value to be overridden with settings
+        "internal_ports": {"ssh": 22},  # overridden by templates
+        "external_ports": {"ssh": 4444},  # Default value to be overridden with settings
         "ssh_key": "",
         "external_user_ports": {},  # Dict mapping internal to external ports {27015: ext1, 27016: ext2, ...}
     }
