@@ -38,8 +38,8 @@ parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(parent_dir)
 
 # Port configuration
-INTERNAL_USER_PORT = 27015  # Port inside the container for user applications
-# External user port is configured via --external.fixed-port flag
+INTERNAL_USER_PORTS = [27015, 27016, 27017, 27018]  # Ports inside the container for user applications
+# External user ports are configured via --external.ports flag
 
 # XXX: global constants should be capitalized or (better) avoided
 #image_name = "ssh-image"  # Docker image name
@@ -122,8 +122,8 @@ def run_container(cpu_usage, ram_usage, hard_disk_usage, gpu_usage, public_key, 
         docker_image = docker_requirement.get("image") or "nirepo/default-pytorch:2.8.0-cuda12.8-cudnn9-runtime"
         docker_env = docker_requirement.get("env", {})
         docker_env["NVIDIA_VISIBLE_DEVICES"] = "all"  # will need adjustment for fractional allcoations
-        docker_internal_ports = docker_requirement.get("internal_ports", {"ssh": 22, "external": 27015})
-        docker_external_ports = docker_requirement.get("external_ports", {"ssh": 4444, "external": 27015})
+        docker_internal_ports = docker_requirement.get("internal_ports", {"ssh": 22})
+        docker_external_ports = docker_requirement.get("external_ports", {"ssh": 4444})
         # now let's map the two dict onto each other e.g. {22: 4444}
         ports_mapping = {
             v: docker_external_ports[k]
@@ -131,6 +131,13 @@ def run_container(cpu_usage, ram_usage, hard_disk_usage, gpu_usage, public_key, 
             if k in docker_external_ports
         }
         docker_ssh_key = docker_requirement.get("ssh_key")
+
+        # Get external_user_ports for multiple port support
+        external_user_ports = docker_requirement.get("external_user_ports", {})
+
+        # Merge external_user_ports into ports_mapping
+        for internal_port, external_port in external_user_ports.items():
+            ports_mapping[int(internal_port)] = external_port
 
         # Calculate 90% of free memory for shm_size
         available_memory = psutil.virtual_memory().available
@@ -197,7 +204,7 @@ def run_container(cpu_usage, ram_usage, hard_disk_usage, gpu_usage, public_key, 
                     "username": "root",
                     "password": password,
                     "port": docker_external_ports["ssh"],
-                    "fixed_external_user_port": docker_external_ports.get("external"),
+                    "external_user_ports": external_user_ports,
                     "version": __version_as_int__
             }
             info_str = json.dumps(info)
