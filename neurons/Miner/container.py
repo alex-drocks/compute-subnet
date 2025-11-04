@@ -537,9 +537,6 @@ def exec_update_container_key(container, new_ssh_key: str, key_type: str = "user
 # Custom templates images for pre-pull (from register-api templates)
 CUSTOM_TEMPLATE_IMAGES = [
     'nirepo/default-pytorch:2.8.0-cuda12.8-cudnn9-runtime',     # default-ubuntu-pytorch
-    'nirepo/ollama-ssh:latest',                                   # ollama-ssh
-    'nirepo/comfyui-ssh:latest',                                 # comfyui-ssh
-    'nirepo/automatic1111-ssh:latest',                           # automatic1111-ssh
     'nirepo/scientific-ssh:latest',                              # scientific-ssh
     'nirepo/jupyter-scipy-ssh:latest',                           # jupyter-scipy-ssh
     'nirepo/jupyter-spark-ssh:latest',                           # jupyter-spark-ssh

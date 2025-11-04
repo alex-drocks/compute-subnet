@@ -13,9 +13,6 @@ from compute.protocol import Allocate
 # Expected digests for template images verification (SHA256 manifest digests from Docker Hub)
 TEMPLATE_EXPECTED_DIGESTS = {
     'nirepo/default-pytorch:2.8.0-cuda12.8-cudnn9-runtime': 'sha256:75c5f262ff46a0b4eb84d914c9f0740d5fc79478a366085fbfd6bce51f48cfe9',
-    'nirepo/ollama-ssh:latest': 'sha256:b689dee49d9b03753d6f76e5ab2f4d6b655d1080234bcc070b1f54e937f233c5',
-    'nirepo/comfyui-ssh:latest': 'sha256:312411098589ca6e8b557589f4dcf5be2a2367045f724ffe807befc4bedc14f1',
-    'nirepo/automatic1111-ssh:latest': 'sha256:5a6da72aabccd04a897706052191db61876dfdc5461b51feebfb1b61912b5e6a',
     'nirepo/scientific-ssh:latest': 'sha256:40c93cdcba24212a71f9348b65d79ed59f113996eed36711c5cb8d240fbebc7e',
     'nirepo/jupyter-scipy-ssh:latest': 'sha256:786f49594c7e1007a20899cea9d5b448d8b22cf45dcefb30a7fa1ff016dfa7b4',
     'nirepo/jupyter-pytorch-ssh:latest': 'sha256:2fed9f3e0053c939f7351db4e61ede650bec2ab7c696a197132dbec6d057ba9a',
