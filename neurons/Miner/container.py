@@ -535,6 +535,13 @@ def exec_update_container_key(container, new_ssh_key: str, key_type: str = "user
     # bt.logging.debug(f"New SSH key: {key_list}")
     container.exec_run(cmd=f"bash -c \"echo '{key_list}' > /root/.ssh/authorized_keys && sync\"")
 
+    # Ensure SSH service is running after key update (required for custom templates)
+    exit_code, output = container.exec_run(cmd="bash -c \"service ssh start 2>/dev/null || /usr/sbin/sshd 2>/dev/null || true\"")
+    if exit_code == 0:
+        bt.logging.info("SSH service started/restarted after key update")
+    else:
+        bt.logging.warning(f"Could not start SSH service: {output.decode('utf-8') if output else 'unknown error'}")
+
     if password is not None:
         container.exec_run(cmd=f"bash -c \"echo 'root:{password}' | chpasswd\"")
     if password == '!':
@@ -544,9 +551,6 @@ def exec_update_container_key(container, new_ssh_key: str, key_type: str = "user
 # Custom templates images for pre-pull (from register-api templates)
 CUSTOM_TEMPLATE_IMAGES = [
     'nirepo/default-pytorch:2.8.0-cuda12.8-cudnn9-runtime',     # default-ubuntu-pytorch
-    'nirepo/ollama-ssh:latest',                                   # ollama-ssh
-    'nirepo/comfyui-ssh:latest',                                 # comfyui-ssh
-    'nirepo/automatic1111-ssh:latest',                           # automatic1111-ssh
     'nirepo/scientific-ssh:latest',                              # scientific-ssh
     'nirepo/jupyter-scipy-ssh:latest',                           # jupyter-scipy-ssh
     'nirepo/jupyter-spark-ssh:latest',                           # jupyter-spark-ssh
