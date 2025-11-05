@@ -18,7 +18,7 @@ TEMPLATE_EXPECTED_DIGESTS = {
     'nirepo/jupyter-pytorch-ssh:latest': 'sha256:d4b50b88ecce611ff7fb271f543eb074d769272472f05e6ce259b099c87a2c08',
     'nirepo/jupyter-tensorflow-ssh:latest': 'sha256:dacbdf6794ff6e4df8cf0cdecdff45f600e88c8a7433b3c631e19742e1a96c69',
     'nirepo/jupyter-spark-ssh:latest': 'sha256:d93b7b7862a3bf1e7dcb1076f45938edcb3fe3b5cdba1b6a74313cd09ba8c316',
-    'nirepo/datascience-ssh:latest': 'sha256:abc833ab8ed50b0832e5d21dc30d051c38eb02e4b51c21a061df07864be25258',
+    'nirepo/datascience-ssh:latest': 'sha256:84945484c1dcdc48adb47a88ccac4f1e337b11242843b55cc74a2c87fa02e269',
 }
 
 
