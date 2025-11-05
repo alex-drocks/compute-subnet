@@ -13,15 +13,12 @@ from compute.protocol import Allocate
 # Expected digests for template images verification (SHA256 manifest digests from Docker Hub)
 TEMPLATE_EXPECTED_DIGESTS = {
     'nirepo/default-pytorch:2.8.0-cuda12.8-cudnn9-runtime': 'sha256:75c5f262ff46a0b4eb84d914c9f0740d5fc79478a366085fbfd6bce51f48cfe9',
-    'nirepo/ollama-ssh:latest': 'sha256:b689dee49d9b03753d6f76e5ab2f4d6b655d1080234bcc070b1f54e937f233c5',
-    'nirepo/comfyui-ssh:latest': 'sha256:312411098589ca6e8b557589f4dcf5be2a2367045f724ffe807befc4bedc14f1',
-    'nirepo/automatic1111-ssh:latest': 'sha256:5a6da72aabccd04a897706052191db61876dfdc5461b51feebfb1b61912b5e6a',
-    'nirepo/scientific-ssh:latest': 'sha256:40c93cdcba24212a71f9348b65d79ed59f113996eed36711c5cb8d240fbebc7e',
-    'nirepo/jupyter-scipy-ssh:latest': 'sha256:786f49594c7e1007a20899cea9d5b448d8b22cf45dcefb30a7fa1ff016dfa7b4',
-    'nirepo/jupyter-pytorch-ssh:latest': 'sha256:2fed9f3e0053c939f7351db4e61ede650bec2ab7c696a197132dbec6d057ba9a',
-    'nirepo/jupyter-tensorflow-ssh:latest': 'sha256:7da61da8faf0089b89f3a580d651979673b129e0713566b4f135df714eb6351f',
-    'nirepo/jupyter-spark-ssh:latest': 'sha256:f808b3ce71f4f535ef4e9b6a7e4a379a2b404f0111553a830a30c316185610e6',
-    'nirepo/datascience-ssh:latest': 'sha256:22793d8634946c4c93f99f5382fc7935b9b14d0def8d0e04ba77cbb74bcfe0f5',
+    'nirepo/scientific-ssh:latest': 'sha256:cb48e758ee297d21d2b5a6f7a3394b0dd16627785f46c5f8ce87fcc0ffeb87dd',
+    'nirepo/jupyter-scipy-ssh:latest': 'sha256:c4889e3eda182a768ce271aed57eba2a3f3bae6476fcd4ce40f2e97249220559',
+    'nirepo/jupyter-pytorch-ssh:latest': 'sha256:d4b50b88ecce611ff7fb271f543eb074d769272472f05e6ce259b099c87a2c08',
+    'nirepo/jupyter-tensorflow-ssh:latest': 'sha256:dacbdf6794ff6e4df8cf0cdecdff45f600e88c8a7433b3c631e19742e1a96c69',
+    'nirepo/jupyter-spark-ssh:latest': 'sha256:d93b7b7862a3bf1e7dcb1076f45938edcb3fe3b5cdba1b6a74313cd09ba8c316',
+    'nirepo/datascience-ssh:latest': 'sha256:abc833ab8ed50b0832e5d21dc30d051c38eb02e4b51c21a061df07864be25258',
 }
 
 
