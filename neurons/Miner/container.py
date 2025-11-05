@@ -417,7 +417,6 @@ def restart_container(public_key: str):
             # restart and reload the container
             # Restart container
             ssh_container.restart(timeout=STOP_TIMEOUT)  # this includes stop with kill fallback
-            ssh_container.wait(timeout=WAIT_TIMEOUT)
             # Reload the container to get updated information
             ssh_container.reload()
             if ssh_container.status == "running":
