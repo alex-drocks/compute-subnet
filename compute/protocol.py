@@ -66,23 +66,22 @@ class Allocate(bt.Synapse):
     Attributes:
     - timeline: The living time of this allocation.
     - device_requirement: Detailed information of device requirements.
-    - checking: Flag that indicates whether it is checking or allocating
+    - checking: Flag that indicates whether to only return Docker info (True) or perform actual allocation (False)
     - public_key: Public key for encryption of data.
     - output: Respond of miner.
     """
 
-    timeline: int = 0
+    timeline: int = 0  # FIXME: this thing is weird
     device_requirement: dict = {}
     checking: bool = True
     output: dict = {}
     public_key: str = ""
     docker_requirement: dict = {
-        "base_image": "ubuntu",
+        "image": "nirepo/default-pytorch:2.8.0-cuda12.8-cudnn9-runtime",
+        "env": {},
+        "internal_ports": {"ssh": 22},  # overridden by templates
+        "external_ports": {"ssh": 4444},  # Default value to be overridden with settings
         "ssh_key": "",
-        "ssh_port": 4444,
-        "volume_path": "/tmp",
-        "dockerfile": "",
-        "external_ports": {},  # Dict for SSH and other control ports
         "external_user_ports": {},  # Dict mapping internal to external ports {27015: ext1, 27016: ext2, ...}
     }
     docker_change: bool = False
