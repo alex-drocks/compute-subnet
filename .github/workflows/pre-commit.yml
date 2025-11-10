@@ -17,5 +17,7 @@ jobs:
         cache-dependency-path: |
           **/pyproject.toml
           **/requirements*.txt
+
+    - run: pip install -U pip\<25.3 pip-tools
     - run: pip install -e .[dev] -r requirements.txt -r requirements-dev.txt
     - uses: pre-commit/action@v3.0.1
