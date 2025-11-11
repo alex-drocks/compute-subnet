@@ -616,6 +616,23 @@ fi
 ##############################################################################
 WALLET_DIR="${HOME}/.bittensor/wallets"
 have_wallets=false
+WALLET_NAME="default"
+HOTKEY_NAME="default"
+
+# Function to list available wallets
+list_available_wallets() {
+  local wallets=()
+  if [ -d "${WALLET_DIR}" ] && [ -n "$(ls -A "${WALLET_DIR}" 2>/dev/null)" ]; then
+    while IFS= read -r wallet_dir; do
+      if [ -d "$wallet_dir" ]; then
+        wallet_name=$(basename "$wallet_dir")
+        wallets+=("$wallet_name")
+      fi
+    done < <(find "${WALLET_DIR}" -maxdepth 1 -type d -not -name "wallets" 2>/dev/null)
+  fi
+  printf '%s\n' "${wallets[@]}"
+}
+
 if [ -d "${WALLET_DIR}" ] && [ -n "$(ls -A "${WALLET_DIR}" 2>/dev/null)" ]; then
   have_wallets=true
 fi
@@ -647,6 +664,45 @@ if ! $have_wallets; then
           ;;
       esac
     done
+  fi
+else
+  # User has wallets, select one (or use default in automated mode)
+  if $AUTOMATED; then
+    info "Using default wallet: WALLET_NAME='${WALLET_NAME}', HOTKEY_NAME='${HOTKEY_NAME}'"
+  else
+    echo
+    echo "Available wallets:"
+    available_wallets=($(list_available_wallets))
+    if [ ${#available_wallets[@]} -gt 0 ]; then
+      # Show available wallets
+      for i in "${!available_wallets[@]}"; do
+        echo "  $((i+1))) ${available_wallets[$i]}"
+      done
+      echo "  $((${#available_wallets[@]}+1))) Use default wallet"
+      echo
+
+      read -rp "Select a wallet [1-$((${#available_wallets[@]}+1))]: " wallet_choice
+
+      if [[ "$wallet_choice" =~ ^[0-9]+$ ]] && [ "$wallet_choice" -ge 1 ] && [ "$wallet_choice" -le $((${#available_wallets[@]}+1)) ]; then
+        if [ "$wallet_choice" -eq $((${#available_wallets[@]}+1)) ]; then
+          WALLET_NAME="default"
+          HOTKEY_NAME="default"
+          info "Using default wallet"
+        else
+          WALLET_NAME="${available_wallets[$((wallet_choice-1))]}"
+          HOTKEY_NAME="default"
+          info "Selected wallet: ${WALLET_NAME}"
+        fi
+      else
+        info "Invalid choice. Using default wallet."
+        WALLET_NAME="default"
+        HOTKEY_NAME="default"
+      fi
+    else
+      info "No wallets found. Using default wallet."
+      WALLET_NAME="default"
+      HOTKEY_NAME="default"
+    fi
   fi
 fi
 
@@ -809,8 +865,8 @@ pm2 start "${VENV_DIR}/bin/python3" \
   "${CS_PATH}/neurons/miner.py" \
   --netuid "${NETUID}" \
   --subtensor.network "${SUBTENSOR_NETWORK}" \
-  --wallet.name "default" \
-  --wallet.hotkey "default" \
+  --wallet.name "${WALLET_NAME}" \
+  --wallet.hotkey "${HOTKEY_NAME}" \
   --axon.port "${AXON_PORT}" \
   --logging.debug \
   --miner.blacklist.force_validator_permit \
