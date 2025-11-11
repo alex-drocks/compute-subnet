@@ -669,7 +669,7 @@ sudo ufw allow 4444/tcp
 if $AUTOMATED; then
   NETUID="${NETUID:-15}"
   if [[ "$NETUID" -eq 27 ]]; then
-    SUBTENSOR_NETWORK_DEFAULT="subvortex.info:9944"
+    SUBTENSOR_NETWORK_DEFAULT="finney"
   else
     SUBTENSOR_NETWORK_DEFAULT="test"
   fi
@@ -684,14 +684,14 @@ else
   read -rp "Your choice [1 or 2]: " network_choice
   if [[ "$network_choice" == "1" ]]; then
     NETUID=27
-    SUBTENSOR_NETWORK_DEFAULT="subvortex.info:9944"
+    SUBTENSOR_NETWORK_DEFAULT="finney"
   elif [[ "$network_choice" == "2" ]]; then
     NETUID=15
     SUBTENSOR_NETWORK_DEFAULT="test"
   else
     echo "Invalid choice. Defaulting to Main Network (27)."
     NETUID=27
-    SUBTENSOR_NETWORK_DEFAULT="subvortex.info:9944"
+    SUBTENSOR_NETWORK_DEFAULT="finney"
   fi
   read -rp "Enter your --subtensor.network (default: ${SUBTENSOR_NETWORK_DEFAULT}): " SUBTENSOR_NETWORK
   SUBTENSOR_NETWORK=${SUBTENSOR_NETWORK:-$SUBTENSOR_NETWORK_DEFAULT}
