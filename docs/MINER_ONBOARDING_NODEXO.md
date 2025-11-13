@@ -43,8 +43,8 @@ Before you begin, ensure you have:
 - ✅ A registered and active miner on Subnet 27 (SN27)
 - ✅ Your miner is properly configured and running (verify with `btcli s list`)
 - ✅ The same coldkey that you used to register your miner
-- ✅ Access to your Bittensor wallet mnemonic (seed phrase)
-- ✅ Chrome browser (for Bittensor Wallet extension)
+- ✅ Access to your Bittensor wallet mnemonic (seed phrase) or ability to sign with `btcli`
+- ✅ Chrome browser (optional, for Bittensor Wallet extension)
 - ✅ Valid email address
 - ✅ Stripe-compatible payment method for receiving payouts
 
@@ -120,9 +120,13 @@ You should see:
 
 ---
 
-## Step 3: Install Bittensor Wallet Extension
+## Step 3: Install Bittensor Wallet Extension (Optional)
 
-To verify ownership of your miner, you'll need the **Bittensor Wallet** browser extension.
+To verify ownership of your miner, you can use the **Bittensor Wallet** browser extension for convenient signing, or alternatively use the manual signature method in Step 6.
+
+> **Note**: This step is optional. If you prefer to use manual signature with `btcli` or other tools, you can skip to Step 4.
+
+### If using the Bittensor Wallet Extension:
 
 1. **Install the Extension**:
 
