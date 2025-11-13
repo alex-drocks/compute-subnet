@@ -116,11 +116,7 @@ You should see:
    - Continue with Google
    - Continue with GitHub
 
-3. **Verify Your Email** (if using email signup):
-
-   Check your inbox for a verification email and click the confirmation link.
-
-4. **Sign In**:
+3. **Sign In**:
 
    Once your account is created, sign in to access the console.
 
@@ -252,7 +248,6 @@ You've successfully completed the provider onboarding process!
 The confirmation modal will show:
 - ✅ Your provider profile is created
 - 💰 Default instance pricing: **$1 per hour**
-- ⏱️ Default minimum runtime: **24 hours**
 
 ### Set Up Stripe Payouts:
 
@@ -294,7 +289,6 @@ Now that you're a verified provider, you can customize your GPU rental pricing:
    For each GPU instance, you can configure:
 
    - **Hourly Rate**: The price clients pay per hour to rent your GPU (default: $1/hour)
-   - **Minimum Runtime**: The minimum time a client must rent your instance (default: 24 hours)
 
 3. **Important Pricing Notes**:
 
@@ -323,26 +317,24 @@ With Nodexo's rental-based model:
 
 1. **Client Rents Your GPU**:
 
-   When a client selects and rents your GPU instance, they pay via Stripe.
+   When a client selects and rents your GPU instance, the rental charges are deducted from their Nodexo account balance.
 
 2. **You Earn Rental Income**:
 
    You receive payment based on:
    - Your configured hourly rate
    - The actual rental duration
-   - Stripe processes the payment
 
-3. **Emissions for Coordination**:
+3. **Payment Processing**:
+
+   You will receive payment after the rental period ends (when the client deallocates the instance).
+
+4. **Emissions for Coordination**:
 
    Bittensor emissions on Subnet 27 are now used primarily for:
    - Coordinating compute resources across the network
    - Providing demand-based incentives
    - Maintaining network infrastructure
-
-### Payment Timeline
-
-- **Rental charges**: Calculated hourly based on usage
-- **Payment processing**: You will receive payment after the rental period ends (when the client deallocates the instance)
 
 ### Maximizing Your Earnings
 
@@ -389,7 +381,7 @@ To maximize your rental income:
 
 ### Q: Can I change my pricing later?
 
-**A:** Yes! You can adjust your hourly rates and minimum runtime at any time through the Nodexo Console.
+**A:** Yes! You can adjust your hourly rates at any time through the Nodexo Console.
 
 ---
 
