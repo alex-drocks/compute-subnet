@@ -18,8 +18,6 @@ Welcome to **Nodexo**! This guide will walk you through the process of becoming 
 10. [Step 8: Configure Instance Pricing](#step-8-configure-instance-pricing)
 11. [Earnings Model](#earnings-model)
 12. [Frequently Asked Questions](#frequently-asked-questions)
-13. [Troubleshooting](#troubleshooting)
-14. [Support](#support)
 
 ---
 
@@ -319,15 +317,13 @@ With Nodexo's rental-based model:
 
    When a client selects and rents your GPU instance, the rental charges are deducted from their Nodexo account balance.
 
-2. **You Earn Rental Income**:
+2. **You Earn Balance**:
 
-   You receive payment based on:
-   - Your configured hourly rate
-   - The actual rental duration
+   After the rental period ends (when the client deallocates the instance), the earnings are added to your Nodexo account balance based on your configured hourly rate.
 
-3. **Payment Processing**:
+3. **Withdraw Your Earnings**:
 
-   You will receive payment after the rental period ends (when the client deallocates the instance).
+   You can withdraw your accumulated balance to your bank account via Stripe at any time through the Nodexo Console.
 
 4. **Emissions for Coordination**:
 
@@ -344,8 +340,6 @@ To maximize your rental income:
 - ✅ Ensure all ports are properly configured and accessible
 - ✅ Maintain competitive pricing for your GPU tier
 - ✅ Provide high-performance hardware with good uptime
-- ✅ Respond quickly to allocation requests
-- ✅ Monitor your WandB metrics for performance issues
 
 ---
 
@@ -369,7 +363,7 @@ To maximize your rental income:
 
 ### Q: How do I withdraw my earnings?
 
-**A:** Earnings are paid out automatically via Stripe to the bank account you configured during onboarding. Check your Stripe dashboard for payout schedules.
+**A:** Your earnings accumulate as balance in your Nodexo account. You can withdraw this balance to your bank account via Stripe at any time through the Nodexo Console.
 
 ### Q: Do I need to pay registration costs still?
 
@@ -385,113 +379,15 @@ To maximize your rental income:
 
 ---
 
-## Troubleshooting
-
-### Issue: "Connect wallet to verify" button is disabled
-
-**Possible causes**:
-- Your miner is not registered on Subnet 27
-- Your miner is offline or not running
-- Network connectivity issues
-
-**Solutions**:
-1. Verify your miner is registered: `btcli s list --netuid 27`
-2. Check your miner is running: `pm2 list`
-3. Review miner logs: `pm2 logs <miner_name>`
-
----
-
-### Issue: Wallet connection fails
-
-**Possible causes**:
-- Bittensor Wallet extension not installed
-- Wrong wallet imported
-- Browser blocking popups
-
-**Solutions**:
-1. Ensure the Bittensor Wallet extension is installed and unlocked
-2. Verify you imported the correct coldkey mnemonic
-3. Check browser popup settings for console.nodexo.ai
-4. Try the manual signature method instead
-
----
-
-### Issue: Stripe onboarding link expired
-
-**Solution**:
-1. Go to Settings in the Nodexo Console
-2. Find the payout settings section
-3. Generate a new Stripe onboarding link
-4. Complete the process within the time limit
-
----
-
-### Issue: My GPU isn't showing up for rent
-
-**Possible causes**:
-- Miner not properly configured
-- Ports not accessible (4444, 8091, 27015-27018)
-- Firewall blocking connections
-- Miner not passing validation checks
-
-**Solutions**:
-1. Run the port validation script:
-   ```bash
-   python3 scripts/validate_miner_ports.py
-   ```
-2. Check firewall rules: `sudo ufw status`
-3. Review validator logs in WandB
-4. Ensure Docker is running: `sudo service docker status`
-
----
-
-### Issue: Not receiving rental requests
-
-**Possible causes**:
-- Pricing too high compared to market rates
-- Lower-tier GPU with limited demand
-- Technical issues preventing allocation
-
-**Solutions**:
-1. Research market rates for your GPU model
-2. Consider adjusting your pricing to be more competitive
-3. Verify your miner is accessible and passing PoG (Proof of GPU) challenges
-4. Check your WandB dashboard for validation scores
-
----
-
-## Support
-
-### Need Help?
-
-- **Nodexo Discord**: [Join the Compute Subnet Channel](https://discord.gg/ZpaGVXfaCF)
-- **Documentation**: [SN27 GitHub Repository](https://github.com/neuralinternet/SN27)
-- **Technical Issues**: Review the [main troubleshooting guide](../README.md#troubleshooting)
-- **Dashboard Metrics**: [OpenCompute Dashboard](https://opencompute.streamlit.app/)
-
-### Reporting Issues
-
-If you encounter bugs or issues with the onboarding process:
-
-1. Check the [GitHub Issues](https://github.com/neuralinternet/SN27/issues)
-2. Provide detailed information:
-   - Your miner UID
-   - Error messages
-   - Steps to reproduce
-   - Screenshots (if applicable)
-
----
-
 ## Next Steps
 
 Once you've completed the onboarding process:
 
 1. ✅ Monitor your instances in the Nodexo Console
-2. ✅ Track your miner performance on WandB
-3. ✅ Keep your miner software updated (use `--auto-update` flag)
-4. ✅ Join the Discord community for updates and support
-5. ✅ Optimize your pricing based on market demand
-6. ✅ Ensure 24/7 uptime for maximum earning potential
+2. ✅ Keep your miner software updated (use `--auto-update` flag)
+3. ✅ Join the Discord community for updates and support
+4. ✅ Optimize your pricing based on market demand
+5. ✅ Ensure 24/7 uptime for maximum earning potential
 
 **Welcome to the Nodexo provider network! Your GPU compute power is now available for rent on the decentralized marketplace.**
 
