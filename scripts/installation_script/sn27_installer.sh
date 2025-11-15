@@ -516,18 +516,40 @@ EOF
   info "Installing OpenCL libraries..."
   install_package ocl-icd-libopencl1 pocl-opencl-icd || abort "Failed to install OpenCL libraries."
 
-  # Check if Node.js and PM2 are already installed
-  if command -v node >/dev/null 2>&1 && command -v pm2 >/dev/null 2>&1; then
-    info "Node.js and PM2 are already installed. Skipping installation."
-    node -v
-    pm2 --version
+  # Check if Node.js is already installed and verify version
+  if command -v node >/dev/null 2>&1; then
+    CURRENT_NODE_VERSION=$(node -v | cut -d'v' -f2 | cut -d'.' -f1)
+    info "Node.js is already installed (version: $(node -v))"
+
+    # Warn if version is older than 20 (18.x or older are deprecated)
+    if [ "$CURRENT_NODE_VERSION" -lt 20 ]; then
+      echo "WARNING: Your Node.js version $(node -v) is deprecated or nearing end of support."
+      echo "Recommended: Node.js 22.x LTS or newer for security updates."
+      echo "Consider upgrading manually: https://github.com/nodesource/distributions"
+      if ! $AUTOMATED; then
+        echo
+        read -rp "Continue with current version? (y/n): " continue_choice
+        if [[ ! "$continue_choice" =~ ^[Yy]$ ]]; then
+          abort "Installation cancelled. Please upgrade Node.js and re-run the installer."
+        fi
+      fi
+    fi
+
+    # Check PM2
+    if command -v pm2 >/dev/null 2>&1; then
+      info "PM2 is already installed (version: $(pm2 --version))"
+    else
+      info "Installing PM2..."
+      sudo npm install -g pm2 || abort "Failed to install PM2."
+      pm2 --version || echo "PM2 installation may have issues."
+    fi
   else
-    info "Installing Node.js, npm and PM2..."
+    info "Installing Node.js 22.x LTS, npm and PM2..."
     run_apt_get update
 
     install_package curl
 
-    curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+    curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
 
     install_package nodejs || abort "Failed to install Node.js."
 
