@@ -667,7 +667,7 @@ list_available_hotkeys() {
         hotkey_name=$(basename "$hotkey_file")
         hotkeys+=("$hotkey_name")
       fi
-    done < <(find "${hotkey_dir}" -maxdepth 1 -type d 2>/dev/null)
+    done < <(find "${hotkey_dir}" -maxdepth 1 -type d -not -name "hotkeys" 2>/dev/null)
   fi
   printf '%s\n' "${hotkeys[@]}"
 }
