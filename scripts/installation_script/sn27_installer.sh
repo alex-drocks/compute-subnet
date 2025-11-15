@@ -663,11 +663,11 @@ list_available_hotkeys() {
 
   if [ -d "${hotkey_dir}" ] && [ -n "$(ls -A "${hotkey_dir}" 2>/dev/null)" ]; then
     while IFS= read -r hotkey_file; do
-      if [ -d "$hotkey_file" ]; then
+      if [ -f "$hotkey_file" ]; then
         hotkey_name=$(basename "$hotkey_file")
         hotkeys+=("$hotkey_name")
       fi
-    done < <(find "${hotkey_dir}" -maxdepth 1 -type d -not -name "hotkeys" 2>/dev/null)
+    done < <(find "${hotkey_dir}" -maxdepth 1 -type f 2>/dev/null)
   fi
   printf '%s\n' "${hotkeys[@]}"
 }
