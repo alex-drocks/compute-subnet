@@ -619,7 +619,7 @@ have_wallets=false
 WALLET_NAME="default"
 HOTKEY_NAME="default"
 
-# Function to list available wallets
+# Function to list available wallets (coldkeys)
 list_available_wallets() {
   local wallets=()
   if [ -d "${WALLET_DIR}" ] && [ -n "$(ls -A "${WALLET_DIR}" 2>/dev/null)" ]; then
@@ -631,6 +631,23 @@ list_available_wallets() {
     done < <(find "${WALLET_DIR}" -maxdepth 1 -type d -not -name "wallets" 2>/dev/null)
   fi
   printf '%s\n' "${wallets[@]}"
+}
+
+# Function to list available hotkeys for a given coldkey
+list_available_hotkeys() {
+  local coldkey_name="$1"
+  local hotkeys=()
+  local hotkey_dir="${WALLET_DIR}/${coldkey_name}/hotkeys"
+
+  if [ -d "${hotkey_dir}" ] && [ -n "$(ls -A "${hotkey_dir}" 2>/dev/null)" ]; then
+    while IFS= read -r hotkey_file; do
+      if [ -d "$hotkey_file" ]; then
+        hotkey_name=$(basename "$hotkey_file")
+        hotkeys+=("$hotkey_name")
+      fi
+    done < <(find "${hotkey_dir}" -maxdepth 1 -type d 2>/dev/null)
+  fi
+  printf '%s\n' "${hotkeys[@]}"
 }
 
 if [ -d "${WALLET_DIR}" ] && [ -n "$(ls -A "${WALLET_DIR}" 2>/dev/null)" ]; then
@@ -671,37 +688,48 @@ else
     info "Using default wallet: WALLET_NAME='${WALLET_NAME}', HOTKEY_NAME='${HOTKEY_NAME}'"
   else
     echo
-    echo "Available wallets:"
+    echo "Available coldkeys (wallets):"
     available_wallets=($(list_available_wallets))
     if [ ${#available_wallets[@]} -gt 0 ]; then
-      # Show available wallets
+      # Show available coldkeys
       for i in "${!available_wallets[@]}"; do
         echo "  $((i+1))) ${available_wallets[$i]}"
       done
-      echo "  $((${#available_wallets[@]}+1))) Use default wallet"
       echo
 
-      read -rp "Select a wallet [1-$((${#available_wallets[@]}+1))]: " wallet_choice
+      read -rp "Select a coldkey [1-${#available_wallets[@]}]: " wallet_choice
 
-      if [[ "$wallet_choice" =~ ^[0-9]+$ ]] && [ "$wallet_choice" -ge 1 ] && [ "$wallet_choice" -le $((${#available_wallets[@]}+1)) ]; then
-        if [ "$wallet_choice" -eq $((${#available_wallets[@]}+1)) ]; then
-          WALLET_NAME="default"
-          HOTKEY_NAME="default"
-          info "Using default wallet"
+      if [[ "$wallet_choice" =~ ^[0-9]+$ ]] && [ "$wallet_choice" -ge 1 ] && [ "$wallet_choice" -le ${#available_wallets[@]} ]; then
+        WALLET_NAME="${available_wallets[$((wallet_choice-1))]}"
+        info "Selected coldkey: ${WALLET_NAME}"
+
+        # Now select hotkey for this coldkey
+        echo
+        echo "Available hotkeys for coldkey '${WALLET_NAME}':"
+        available_hotkeys=($(list_available_hotkeys "${WALLET_NAME}"))
+
+        if [ ${#available_hotkeys[@]} -gt 0 ]; then
+          for i in "${!available_hotkeys[@]}"; do
+            echo "  $((i+1))) ${available_hotkeys[$i]}"
+          done
+          echo
+
+          read -rp "Select a hotkey [1-${#available_hotkeys[@]}]: " hotkey_choice
+
+          if [[ "$hotkey_choice" =~ ^[0-9]+$ ]] && [ "$hotkey_choice" -ge 1 ] && [ "$hotkey_choice" -le ${#available_hotkeys[@]} ]; then
+            HOTKEY_NAME="${available_hotkeys[$((hotkey_choice-1))]}"
+            info "Selected hotkey: ${HOTKEY_NAME}"
+          else
+            abort "Invalid hotkey selection. Please run the script again."
+          fi
         else
-          WALLET_NAME="${available_wallets[$((wallet_choice-1))]}"
-          HOTKEY_NAME="default"
-          info "Selected wallet: ${WALLET_NAME}"
+          abort "No hotkeys found for coldkey '${WALLET_NAME}'. Please create a hotkey first using: btcli wallet new_hotkey --wallet.name ${WALLET_NAME} --wallet.hotkey <HOTKEY_NAME>"
         fi
       else
-        info "Invalid choice. Using default wallet."
-        WALLET_NAME="default"
-        HOTKEY_NAME="default"
+        abort "Invalid coldkey selection. Please run the script again."
       fi
     else
-      info "No wallets found. Using default wallet."
-      WALLET_NAME="default"
-      HOTKEY_NAME="default"
+      abort "No wallets found in ${WALLET_DIR}. Please create a wallet first."
     fi
   fi
 fi
