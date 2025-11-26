@@ -18,7 +18,7 @@
 import string
 
 # Define the version of the template module.
-__version__ = "2.3.0"
+__version__ = "2.3.2"
 __minimal_miner_version__ = "2.3.0"
 __minimal_validator_version__ = "2.3.0"
 

@@ -516,18 +516,40 @@ EOF
   info "Installing OpenCL libraries..."
   install_package ocl-icd-libopencl1 pocl-opencl-icd || abort "Failed to install OpenCL libraries."
 
-  # Check if Node.js and PM2 are already installed
-  if command -v node >/dev/null 2>&1 && command -v pm2 >/dev/null 2>&1; then
-    info "Node.js and PM2 are already installed. Skipping installation."
-    node -v
-    pm2 --version
+  # Check if Node.js is already installed and verify version
+  if command -v node >/dev/null 2>&1; then
+    CURRENT_NODE_VERSION=$(node -v | cut -d'v' -f2 | cut -d'.' -f1)
+    info "Node.js is already installed (version: $(node -v))"
+
+    # Warn if version is older than 20 (18.x or older are deprecated)
+    if [ "$CURRENT_NODE_VERSION" -lt 20 ]; then
+      echo "WARNING: Your Node.js version $(node -v) is deprecated or nearing end of support."
+      echo "Recommended: Node.js 22.x LTS or newer for security updates."
+      echo "Consider upgrading manually: https://github.com/nodesource/distributions"
+      if ! $AUTOMATED; then
+        echo
+        read -rp "Continue with current version? (y/n): " continue_choice
+        if [[ ! "$continue_choice" =~ ^[Yy]$ ]]; then
+          abort "Installation cancelled. Please upgrade Node.js and re-run the installer."
+        fi
+      fi
+    fi
+
+    # Check PM2
+    if command -v pm2 >/dev/null 2>&1; then
+      info "PM2 is already installed (version: $(pm2 --version))"
+    else
+      info "Installing PM2..."
+      sudo npm install -g pm2 || abort "Failed to install PM2."
+      pm2 --version || echo "PM2 installation may have issues."
+    fi
   else
-    info "Installing Node.js, npm and PM2..."
+    info "Installing Node.js 22.x LTS, npm and PM2..."
     run_apt_get update
 
     install_package curl
 
-    curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+    curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
 
     install_package nodejs || abort "Failed to install Node.js."
 
@@ -616,6 +638,40 @@ fi
 ##############################################################################
 WALLET_DIR="${HOME}/.bittensor/wallets"
 have_wallets=false
+WALLET_NAME="default"
+HOTKEY_NAME="default"
+
+# Function to list available wallets (coldkeys)
+list_available_wallets() {
+  local wallets=()
+  if [ -d "${WALLET_DIR}" ] && [ -n "$(ls -A "${WALLET_DIR}" 2>/dev/null)" ]; then
+    while IFS= read -r wallet_dir; do
+      if [ -d "$wallet_dir" ]; then
+        wallet_name=$(basename "$wallet_dir")
+        wallets+=("$wallet_name")
+      fi
+    done < <(find "${WALLET_DIR}" -maxdepth 1 -type d -not -name "wallets" 2>/dev/null)
+  fi
+  printf '%s\n' "${wallets[@]}"
+}
+
+# Function to list available hotkeys for a given coldkey
+list_available_hotkeys() {
+  local coldkey_name="$1"
+  local hotkeys=()
+  local hotkey_dir="${WALLET_DIR}/${coldkey_name}/hotkeys"
+
+  if [ -d "${hotkey_dir}" ] && [ -n "$(ls -A "${hotkey_dir}" 2>/dev/null)" ]; then
+    while IFS= read -r hotkey_file; do
+      if [ -f "$hotkey_file" ]; then
+        hotkey_name=$(basename "$hotkey_file")
+        hotkeys+=("$hotkey_name")
+      fi
+    done < <(find "${hotkey_dir}" -maxdepth 1 -type f 2>/dev/null)
+  fi
+  printf '%s\n' "${hotkeys[@]}"
+}
+
 if [ -d "${WALLET_DIR}" ] && [ -n "$(ls -A "${WALLET_DIR}" 2>/dev/null)" ]; then
   have_wallets=true
 fi
@@ -648,6 +704,56 @@ if ! $have_wallets; then
       esac
     done
   fi
+else
+  # User has wallets, select one (or use default in automated mode)
+  if $AUTOMATED; then
+    info "Using default wallet: WALLET_NAME='${WALLET_NAME}', HOTKEY_NAME='${HOTKEY_NAME}'"
+  else
+    echo
+    echo "Available coldkeys (wallets):"
+    available_wallets=($(list_available_wallets))
+    if [ ${#available_wallets[@]} -gt 0 ]; then
+      # Show available coldkeys
+      for i in "${!available_wallets[@]}"; do
+        echo "  $((i+1))) ${available_wallets[$i]}"
+      done
+      echo
+
+      read -rp "Select a coldkey [1-${#available_wallets[@]}]: " wallet_choice
+
+      if [[ "$wallet_choice" =~ ^[0-9]+$ ]] && [ "$wallet_choice" -ge 1 ] && [ "$wallet_choice" -le ${#available_wallets[@]} ]; then
+        WALLET_NAME="${available_wallets[$((wallet_choice-1))]}"
+        info "Selected coldkey: ${WALLET_NAME}"
+
+        # Now select hotkey for this coldkey
+        echo
+        echo "Available hotkeys for coldkey '${WALLET_NAME}':"
+        available_hotkeys=($(list_available_hotkeys "${WALLET_NAME}"))
+
+        if [ ${#available_hotkeys[@]} -gt 0 ]; then
+          for i in "${!available_hotkeys[@]}"; do
+            echo "  $((i+1))) ${available_hotkeys[$i]}"
+          done
+          echo
+
+          read -rp "Select a hotkey [1-${#available_hotkeys[@]}]: " hotkey_choice
+
+          if [[ "$hotkey_choice" =~ ^[0-9]+$ ]] && [ "$hotkey_choice" -ge 1 ] && [ "$hotkey_choice" -le ${#available_hotkeys[@]} ]; then
+            HOTKEY_NAME="${available_hotkeys[$((hotkey_choice-1))]}"
+            info "Selected hotkey: ${HOTKEY_NAME}"
+          else
+            abort "Invalid hotkey selection. Please run the script again."
+          fi
+        else
+          abort "No hotkeys found for coldkey '${WALLET_NAME}'. Please create a hotkey first using: btcli wallet new_hotkey --wallet.name ${WALLET_NAME} --wallet.hotkey <HOTKEY_NAME>"
+        fi
+      else
+        abort "Invalid coldkey selection. Please run the script again."
+      fi
+    else
+      abort "No wallets found in ${WALLET_DIR}. Please create a wallet first."
+    fi
+  fi
 fi
 
 ##############################################################################
@@ -669,7 +775,7 @@ sudo ufw allow 4444/tcp
 if $AUTOMATED; then
   NETUID="${NETUID:-15}"
   if [[ "$NETUID" -eq 27 ]]; then
-    SUBTENSOR_NETWORK_DEFAULT="subvortex.info:9944"
+    SUBTENSOR_NETWORK_DEFAULT="finney"
   else
     SUBTENSOR_NETWORK_DEFAULT="test"
   fi
@@ -684,14 +790,14 @@ else
   read -rp "Your choice [1 or 2]: " network_choice
   if [[ "$network_choice" == "1" ]]; then
     NETUID=27
-    SUBTENSOR_NETWORK_DEFAULT="subvortex.info:9944"
+    SUBTENSOR_NETWORK_DEFAULT="finney"
   elif [[ "$network_choice" == "2" ]]; then
     NETUID=15
     SUBTENSOR_NETWORK_DEFAULT="test"
   else
     echo "Invalid choice. Defaulting to Main Network (27)."
     NETUID=27
-    SUBTENSOR_NETWORK_DEFAULT="subvortex.info:9944"
+    SUBTENSOR_NETWORK_DEFAULT="finney"
   fi
   read -rp "Enter your --subtensor.network (default: ${SUBTENSOR_NETWORK_DEFAULT}): " SUBTENSOR_NETWORK
   SUBTENSOR_NETWORK=${SUBTENSOR_NETWORK:-$SUBTENSOR_NETWORK_DEFAULT}
@@ -809,8 +915,8 @@ pm2 start "${VENV_DIR}/bin/python3" \
   "${CS_PATH}/neurons/miner.py" \
   --netuid "${NETUID}" \
   --subtensor.network "${SUBTENSOR_NETWORK}" \
-  --wallet.name "default" \
-  --wallet.hotkey "default" \
+  --wallet.name "${WALLET_NAME}" \
+  --wallet.hotkey "${HOTKEY_NAME}" \
   --axon.port "${AXON_PORT}" \
   --logging.debug \
   --miner.blacklist.force_validator_permit \
