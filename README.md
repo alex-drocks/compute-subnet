@@ -58,7 +58,7 @@ Welcome to the **Bittensor NI Compute Subnet** repository. This subnet powers a 
 ## Key Resources
 
 - **NI Compute App (Rent GPUs)**
-  [Cloud Platform](https://app.neuralinternet.ai/)
+  [Cloud Platform](https://console.nodexo.ai/)
 
 - **Subnet 27 (This Repo)**
   [GitHub: neuralinternet/SN27](https://github.com/neuralinternet/SN27)
@@ -585,7 +585,7 @@ See the **[Reward Program for Valuable Contributions](https://github.com/neurali
 
 ```
 The MIT License (MIT)
-© 2023 Neural Internet
+© 2023 Nodexo
 
 Permission is hereby granted, free of charge, to any person obtaining a copy of
 this software and associated documentation files (the “Software”), to deal in

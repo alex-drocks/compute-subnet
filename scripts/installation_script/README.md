@@ -181,4 +181,5 @@ Using this approach, you ensure that all dependencies are in place and that you 
 
 - [Weights & Biases Documentation](https://docs.wandb.ai/)
 - [Bittensor Documentation](https://docs.bittensor.com/)
+- [Nodexo Documentation](https://docs.nodexo.ai/)
 - [SN27 Repository](https://github.com/neuralinternet/SN27)
