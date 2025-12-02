@@ -12,6 +12,10 @@ aiohttp==3.10.11
     #   bittensor-cli
 aiosignal==1.3.2
     # via aiohttp
+allure-pytest==2.13.5
+    # via Nodexo-Compute (pyproject.toml)
+allure-python-commons==2.13.5
+    # via allure-pytest
 altgraph==0.17.4
     # via pyinstaller
 annotated-types==0.7.0
@@ -29,7 +33,7 @@ asyncstdlib==3.13.0
     #   async-substrate-interface
     #   bittensor
 at==0.0.3
-    # via NI-Compute (pyproject.toml)
+    # via Nodexo-Compute (pyproject.toml)
 attrs==25.1.0
     # via aiohttp
 backoff==2.2.1
@@ -39,7 +43,7 @@ base58==2.1.1
 bcrypt==4.3.0
     # via paramiko
 bittensor[cli]==9.0.0
-    # via NI-Compute (pyproject.toml)
+    # via Nodexo-Compute (pyproject.toml)
 bittensor-cli==9.1.0
     # via bittensor
 bittensor-commit-reveal==0.2.0
@@ -50,7 +54,7 @@ bittensor-wallet==3.0.4
     #   bittensor
     #   bittensor-cli
 blake3==1.0.4
-    # via NI-Compute (pyproject.toml)
+    # via Nodexo-Compute (pyproject.toml)
 bt-decode==0.5.0a2
     # via async-substrate-interface
 build==1.2.2.post1
@@ -81,7 +85,7 @@ coverage[toml]==7.6.12
     # via pytest-cov
 cryptography==43.0.1
     # via
-    #   NI-Compute (pyproject.toml)
+    #   Nodexo-Compute (pyproject.toml)
     #   bittensor-wallet
     #   paramiko
 cytoolz==1.0.1
@@ -95,7 +99,7 @@ distlib==0.3.9
 dnspython==2.7.0
     # via ipwhois
 docker==7.0.0
-    # via NI-Compute (pyproject.toml)
+    # via Nodexo-Compute (pyproject.toml)
 docker-pycreds==0.4.0
     # via wandb
 eth-hash==0.7.1
@@ -131,21 +135,21 @@ google-api-core[grpc]==2.25.1
     #   google-cloud-pubsub
 google-auth==2.40.3
     # via
-    #   NI-Compute (pyproject.toml)
+    #   Nodexo-Compute (pyproject.toml)
     #   google-api-core
     #   google-cloud-core
     #   google-cloud-pubsub
 google-cloud-core==2.4.3
-    # via NI-Compute (pyproject.toml)
+    # via Nodexo-Compute (pyproject.toml)
 google-cloud-pubsub==2.31.1
-    # via NI-Compute (pyproject.toml)
+    # via Nodexo-Compute (pyproject.toml)
 googleapis-common-protos[grpc]==1.70.0
     # via
     #   google-api-core
     #   grpc-google-iam-v1
     #   grpcio-status
 gputil==1.4.0
-    # via NI-Compute (pyproject.toml)
+    # via Nodexo-Compute (pyproject.toml)
 grpc-google-iam-v1==0.14.2
     # via google-cloud-pubsub
 grpcio==1.74.0
@@ -169,13 +173,13 @@ idna==3.10
     #   requests
     #   yarl
 igpu==0.1.2
-    # via NI-Compute (pyproject.toml)
+    # via Nodexo-Compute (pyproject.toml)
 importlib-metadata==8.7.0
     # via opentelemetry-api
 iniconfig==2.0.0
     # via pytest
 ipwhois==1.3.0
-    # via NI-Compute (pyproject.toml)
+    # via Nodexo-Compute (pyproject.toml)
 jinja2==3.1.5
     # via
     #   bittensor-cli
@@ -218,7 +222,7 @@ nodeenv==1.9.1
     # via pre-commit
 numpy==2.0.2
     # via
-    #   NI-Compute (pyproject.toml)
+    #   Nodexo-Compute (pyproject.toml)
     #   bittensor
     #   bittensor-cli
     #   msgpack-numpy-opentensor
@@ -275,11 +279,11 @@ packaging==24.2
     #   pyinstaller-hooks-contrib
     #   pytest
 paramiko==3.4.1
-    # via NI-Compute (pyproject.toml)
+    # via Nodexo-Compute (pyproject.toml)
 password-strength==0.0.3.post2
     # via bittensor-wallet
 pip-tools==7.4.1
-    # via NI-Compute (pyproject.toml)
+    # via Nodexo-Compute (pyproject.toml)
 platformdirs==4.3.6
     # via
     #   virtualenv
@@ -291,7 +295,7 @@ plotly==6.0.0
 pluggy==1.5.0
     # via pytest
 pre-commit==4.1.0
-    # via NI-Compute (pyproject.toml)
+    # via Nodexo-Compute (pyproject.toml)
 propcache==0.3.0
     # via yarl
 proto-plus==1.26.1
@@ -309,7 +313,7 @@ protobuf==5.29.3
     #   wandb
 psutil==5.9.8
     # via
-    #   NI-Compute (pyproject.toml)
+    #   Nodexo-Compute (pyproject.toml)
     #   igpu
     #   wandb
 py==1.11.0
@@ -336,11 +340,11 @@ pydantic==2.10.6
 pydantic-core==2.27.2
     # via pydantic
 pyfiglet==1.0.2
-    # via NI-Compute (pyproject.toml)
+    # via Nodexo-Compute (pyproject.toml)
 pygments==2.19.1
     # via rich
 pyinstaller==6.4.0
-    # via NI-Compute (pyproject.toml)
+    # via Nodexo-Compute (pyproject.toml)
 pyinstaller-hooks-contrib==2025.1
     # via pyinstaller
 pynacl==1.5.0
@@ -353,13 +357,14 @@ pyproject-hooks==1.2.0
     #   pip-tools
 pytest==8.3.5
     # via
-    #   NI-Compute (pyproject.toml)
+    #   Nodexo-Compute (pyproject.toml)
+    #   allure-pytest
     #   bittensor-cli
     #   pytest-cov
 pytest-cov==6.0.0
-    # via NI-Compute (pyproject.toml)
+    # via Nodexo-Compute (pyproject.toml)
 python-dotenv==1.0.1
-    # via NI-Compute (pyproject.toml)
+    # via Nodexo-Compute (pyproject.toml)
 python-levenshtein==0.27.1
     # via
     #   bittensor
@@ -378,7 +383,7 @@ rapidfuzz==3.12.2
     # via levenshtein
 requests==2.31.0
     # via
-    #   NI-Compute (pyproject.toml)
+    #   Nodexo-Compute (pyproject.toml)
     #   bittensor
     #   docker
     #   google-api-core
@@ -427,7 +432,7 @@ toml==0.10.0
 toolz==1.0.0
     # via cytoolz
 torch==2.5.1
-    # via NI-Compute (pyproject.toml)
+    # via Nodexo-Compute (pyproject.toml)
 triton==3.1.0
     # via torch
 typer==0.15.2
@@ -454,7 +459,7 @@ uvicorn==0.34.0
 virtualenv==20.29.2
     # via pre-commit
 wandb==0.19.0
-    # via NI-Compute (pyproject.toml)
+    # via Nodexo-Compute (pyproject.toml)
 websockets==15.0
     # via
     #   async-substrate-interface

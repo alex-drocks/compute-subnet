@@ -5,8 +5,8 @@ requires = [
 build-backend = "hatchling.build"
 
 [project]
-name = "NI-Compute"
-description="NI Compute Subnet"
+name = "Nodexo-Compute"
+description="Nodexo Compute Subnet"
 author="neuralinternet.ai"
 authors = [
      {name = "Nodexo"},

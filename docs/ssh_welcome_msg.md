@@ -9,6 +9,6 @@
 **Footer Branding**
 ```
 ────────────────────────────────────────────────────────────────────────────────
-NODEXO CLOUD • Governed by Techno Optimists • Powered by NI Compute & Bittensor
+NODEXO CLOUD • Governed by Techno Optimists • Powered by Nodexo Compute & Bittensor
 ────────────────────────────────────────────────────────────────────────────────
 ```
