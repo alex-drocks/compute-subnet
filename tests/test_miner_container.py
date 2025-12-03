@@ -258,15 +258,12 @@ class TestRunContainer:
         _, kwargs = docker_client.containers.run.call_args
         assert kwargs.get("name") == "test_container"
 
-        # Verify both file writes occurred (dockerfile and allocation_key)
-        assert mock_open_fn.call_count == 2
+        # Verify file write occurred (allocation_key)
+        assert mock_open_fn.call_count == 1
         calls = mock_open_fn.call_args_list
-        # First call is for dockerfile
-        assert calls[0][0][0] == './tmp/dockerfile'
+        # Call is for allocation_key
+        assert calls[0][0][0] == 'allocation_key'
         assert calls[0][0][1] == 'w'
-        # Second call is for allocation_key
-        assert calls[1][0][0] == 'allocation_key'
-        assert calls[1][0][1] == 'w'
 
         expected_info = base64.b64encode(b"encrypted_data").decode("utf-8")
         assert result
@@ -297,7 +294,8 @@ class TestRunContainer:
         docker_requirement = {
             "image": "dummy_image",
             "ssh_key": "dummy_ssh_key",
-            "external_ports": {"ssh": 2222, "external": 8000},  # Specific external port to test
+            "external_ports": {"ssh": 2222},
+            "external_user_ports": {"27015": 8000},  # Specific external port to test
         }
         testing = True
 
@@ -322,8 +320,8 @@ class TestRunContainer:
         assert 27015 in actual_ports  # Internal user port
         assert actual_ports[27015] == 8000  # External port from external_user_ports
 
-        # Verify file operations (both dockerfile and allocation_key)
-        assert mock_open_fn.call_count == 2
+        # Verify file operations (allocation_key)
+        assert mock_open_fn.call_count == 1
 
         # Verify result structure
         expected_info = base64.b64encode(b"encrypted_data").decode("utf-8")
@@ -383,8 +381,8 @@ class TestRunContainer:
         #assert actual_ports[27015] is None
         # FIXME: not sure but I think we changed this logic - now it's only included if specified
 
-        # Verify file operations (both dockerfile and allocation_key)
-        assert mock_open_fn.call_count == 2
+        # Verify file operations (allocation_key)
+        assert mock_open_fn.call_count == 1
 
         # Verify result structure
         expected_info = base64.b64encode(b"encrypted_data").decode("utf-8")
