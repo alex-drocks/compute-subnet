@@ -107,8 +107,8 @@ class MinerChecker:
                     private_key = private_key.encode("utf-8")
                     decrypted_info_str = rsa.decrypt_data(private_key, base64.b64decode(response["info"]))
                     info = json.loads(decrypted_info_str)
-                    # Use the SSH check function
-                    is_ssh_access = self.check_ssh_login(axon.ip, info['port'], info['username'], info['password'])
+                    # Use the SSH check function (SSH key-based authentication)
+                    is_ssh_access = self.check_ssh_login(axon.ip, info['port'], info['username'])
                 else:
                     # Penalize if the allocation failed
                     self.penalize_miner(axon.hotkey, "ALLOCATION_FAILED", "Allocation failed during resource allocation")
@@ -149,12 +149,13 @@ class MinerChecker:
             # Penalize if SSH access fails
             self.penalize_miner(axon.hotkey, "SSH_ACCESS_DISABLED", "Failed SSH access")
 
-    def check_ssh_login(self, host, port, username, password):
-        """Check SSH login using Paramiko."""
+    def check_ssh_login(self, host, port, username, pkey=None):
+        """Check SSH login using Paramiko with SSH key authentication."""
         try:
             ssh_client = paramiko.SSHClient()
             ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            ssh_client.connect(hostname=host, port=port, username=username, password=password, timeout=10)
+            # Use SSH key authentication if available
+            ssh_client.connect(hostname=host, port=port, username=username, pkey=pkey, timeout=10)
             bt.logging.info(f"SSH login successful for {host}")
             return True
         except paramiko.AuthenticationException:

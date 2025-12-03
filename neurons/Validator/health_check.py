@@ -238,7 +238,8 @@ def wait_for_health_check(host: str, port: int, timeout: int = 30, retry_interva
 
 def perform_health_check(
     axon: bt.AxonInfo,
-    miner_info: dict[str, str | int]
+    miner_info: dict[str, str | int],
+    ssh_private_key=None
 ) -> bool:
     """
     Performs health check on a miner after POG has finished.
@@ -246,6 +247,7 @@ def perform_health_check(
     Args:
         axon: Axon information of the miner
         miner_info: Miner information (host, port, etc.) - always provided by POG
+        ssh_private_key: The validator's SSH private key for authentication
 
     Returns:
         bool: True if health check is successful, False otherwise
@@ -263,7 +265,7 @@ def perform_health_check(
         ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         try:
             bt.logging.trace(f"{hotkey}: Attempting SSH connection to {host}")
-            ssh_client.connect(host, port=miner_info.get('port', 22), username=miner_info['username'], password=miner_info['password'], timeout=10)
+            ssh_client.connect(host, port=miner_info.get('port', 22), username=miner_info['username'], pkey=ssh_private_key, timeout=10)
             bt.logging.trace(f"{hotkey}: SSH connection successful.")
         except Exception as ssh_error:
             bt.logging.debug(f"{hotkey}: SSH connection failed - miner may be offline or credentials incorrect: {ssh_error}")
