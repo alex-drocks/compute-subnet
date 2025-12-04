@@ -775,7 +775,7 @@ def list_penalizations(wandb):
 def print_welcome_message():
     welcome_text = pyfiglet.figlet_format("Compute Subnet 27", width=120)
     print(welcome_text)
-    print("Powered by Neural Internet")
+    print("Powered by Nodexo")
     print(f"Version: {get_local_version()}\n")
 
 def main():
