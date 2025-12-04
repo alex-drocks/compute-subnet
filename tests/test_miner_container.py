@@ -190,7 +190,7 @@ def mock_container_build(monkeypatch):
     patcher3 = mock.patch('neurons.Miner.container.rsa.encrypt_data', return_value=b"encrypted_data")
     patcher4 = mock.patch('neurons.Miner.container.psutil.virtual_memory', return_value=DummyVirtualMemory())
     #patcher5 = mock.patch('neurons.Miner.container.build_sample_container')
-    patcher6 = mock.patch('neurons.Miner.container.password_generator', return_value="testpwd")
+    # patcher6 removed - password_generator no longer exists in container.py
     patcher7 = mock.patch('neurons.Miner.container.exec_update_container_key')
 
     # Set module-level globals required by run_container.
@@ -203,13 +203,11 @@ def mock_container_build(monkeypatch):
     patcher3.start()
     patcher4.start()
     #patcher5.start()
-    patcher6.start()
     patcher7.start()
 
     yield
 
     patcher7.stop()
-    patcher6.stop()
     #patcher5.stop()
     patcher4.stop()
     patcher3.stop()

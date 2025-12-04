@@ -67,7 +67,8 @@ dev = [
     "pip-tools",
     "pre-commit",
     "pytest",
-    "pytest-cov"
+    "pytest-cov",
+    "pytest-asyncio"
 ]
 
 [project.urls]
