@@ -534,7 +534,7 @@ def exec_update_container_key(container, new_ssh_key: str, key_type: str = "user
 
 
 
-# Custom templates images for pre-pull (from register-api templates)
+# Custom template images for pre-pull
 CUSTOM_TEMPLATE_IMAGES = [
     'nirepo/default-pytorch:2.8.0-cuda12.8-cudnn9-runtime',     # default-ubuntu-pytorch
     'nirepo/scientific-ssh:latest',                              # scientific-ssh

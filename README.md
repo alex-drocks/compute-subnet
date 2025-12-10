@@ -523,7 +523,7 @@ pm2 start ./neurons/validator.py --name <VALIDATOR_NAME> --interpreter python3 -
 ---
 
 ## Resource Allocation Mechanism
-Validators reserve resources from miners by specifying required CPU, GPU count, memory, etc. The subnet dynamically allocates and deallocates miner resources based on **availability** and **network demands**. A validator can request resources from a miner using scripts such as [neurons/register.py](neurons/register.py). Example resource request:
+Validators reserve resources from miners by specifying required CPU, GPU count, memory, etc. The subnet dynamically allocates and deallocates miner resources based on **availability** and **network demands**. Example resource request:
 ```
 {"cpu":{"count":1}, "gpu":{"count":1}, "hard_disk":{"capacity":10737418240}, "ram":{"capacity":1073741824}}
 ```
