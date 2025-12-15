@@ -355,7 +355,10 @@ pytest==8.3.5
     # via
     #   Nodexo-Compute (pyproject.toml)
     #   bittensor-cli
+    #   pytest-asyncio
     #   pytest-cov
+pytest-asyncio==1.3.0
+    # via Nodexo-Compute (pyproject.toml)
 pytest-cov==6.0.0
     # via Nodexo-Compute (pyproject.toml)
 python-dotenv==1.0.1
@@ -442,6 +445,7 @@ typing-extensions==4.12.2
     #   opentelemetry-semantic-conventions
     #   pydantic
     #   pydantic-core
+    #   pytest-asyncio
     #   torch
     #   typer
 urllib3==2.3.0

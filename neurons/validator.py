@@ -1086,7 +1086,7 @@ class Validator:
                 bt.logging.debug(f"🏥 {hotkey}: POG completed successfully, starting health check...")
                 bt.logging.trace(f"{hotkey}: [Step 8] Initiating health check...")
                 try:
-                    health_check_result = perform_health_check(axon, miner_info)
+                    health_check_result = perform_health_check(axon, miner_info, self.ssh_private_key)
                     if health_check_result:
                         bt.logging.success(f"✅ {hotkey}: Health check passed")
                         bt.logging.trace(f"{hotkey}: [Step 8] Health check completed successfully - miner is accessible")
@@ -1367,7 +1367,6 @@ class Validator:
                             'host': axon.ip,
                             'port': info['port'],
                             'username': info['username'],
-                            'password': info['password'],
                             'external_user_ports': info.get('external_user_ports', {}),
                         }
                         await self.pubsub_client.publish_miner_allocation(
@@ -1869,7 +1868,7 @@ class Validator:
             ssh.connect(miner_info["host"],
                         port     = miner_info.get("port", 22),
                         username = miner_info["username"],
-                        password = miner_info["password"],
+                        pkey     = self.ssh_private_key,
                         timeout  = 10)
             bt.logging.trace(f"[Sybil-PoG] {hotkey}: SSH OK")
 

@@ -110,7 +110,6 @@ def run_container(cpu_usage, ram_usage, hard_disk_usage, gpu_usage, public_key, 
     try:
         client, containers = get_docker()
         # Configuration
-        password = password_generator(10)  # let's deprecate password, it creates all kind of issues
         cpu_assignment = cpu_usage["assignment"]  # e.g : 0-1
         ram_limit = ram_usage["capacity"]  # e.g : 5g
         hard_disk_capacity = hard_disk_usage["capacity"]  # e.g : 100g
@@ -197,12 +196,11 @@ def run_container(cpu_usage, ram_usage, hard_disk_usage, gpu_usage, public_key, 
         if container.status == "created":
             bt.logging.info("Container was created successfully.")
 
-            exec_update_container_key(container, new_ssh_key=docker_ssh_key, key_type="user", password=password)
+            exec_update_container_key(container, new_ssh_key=docker_ssh_key, key_type="user")
             bt.logging.info("Container ssh key set.")
 
             info = {
                     "username": "root",
-                    "password": password,
                     "port": docker_external_ports["ssh"],
                     "external_user_ports": external_user_ports,
                     "version": __version_as_int__
@@ -358,13 +356,6 @@ def get_deployed_container_info():
             "container_name": None,
             "deployed_image": None
         }
-
-
-# Randomly generate password for given length
-def password_generator(length):
-    alphabet = string.ascii_letters + string.digits  # You can customize this as needed
-    random_str = "".join(secrets.choice(alphabet) for _ in range(length))
-    return random_str
 
 
 def retrieve_allocation_key():
@@ -541,10 +532,6 @@ def exec_update_container_key(container, new_ssh_key: str, key_type: str = "user
     else:
         bt.logging.warning(f"Could not start SSH service: {output.decode('utf-8') if output else 'unknown error'}")
 
-    if password is not None:
-        container.exec_run(cmd=f"bash -c \"echo 'root:{password}' | chpasswd\"")
-    if password == '!':
-        container.exec_run(cmd=f"bash -c \"echo 'root:!' | chpasswd -e\"")
 
 
 # Custom templates images for pre-pull (from register-api templates)
