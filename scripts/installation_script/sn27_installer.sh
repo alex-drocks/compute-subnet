@@ -235,6 +235,10 @@ cuda_version_installed() {
   if [ -z "$ver" ] && command -v nvcc >/dev/null 2>&1; then
     ver=$(nvcc --version | grep "release" | sed 's/.*release //' | sed 's/,.*//')
   fi
+  # Check nvidia-smi (CUDA runtime from drivers)
+  if [ -z "$ver" ] && command -v nvidia-smi >/dev/null 2>&1; then
+    ver=$(nvidia-smi | grep "CUDA Version" | awk '{print $9}' | cut -d'.' -f1,2)
+  fi
   echo "$ver"
 }
 
@@ -370,8 +374,8 @@ if ! docker_installed || ! nvidia_docker_installed || ! [[ -n "$CURRENT_CUDA" ]]
       {
         echo ""
         echo "# CUDA configuration added by sn27_installer.sh"
-        echo "export PATH=/usr/local/cuda-12.8/bin:\$PATH"
-        echo "export LD_LIBRARY_PATH=/usr/local/cuda-12.8/lib64:\$LD_LIBRARY_PATH"
+        echo "export PATH=/usr/local/cuda/bin:\$PATH"
+        echo "export LD_LIBRARY_PATH=/usr/local/cuda/lib64:\$LD_LIBRARY_PATH"
       } | tee -a "${HOME_DIR}/.bashrc"
       info "CUDA environment variables appended to ${HOME_DIR}/.bashrc"
     else
@@ -907,6 +911,21 @@ if [ ! -x "${CS_PATH}/neurons/miner.py" ]; then
 fi
 
 info "Starting miner with PM2..."
+
+# Detect CUDA path dynamically
+CUDA_BIN_PATH=""
+CUDA_LIB_PATH=""
+if [ -d "/usr/local/cuda/bin" ]; then
+  CUDA_BIN_PATH="/usr/local/cuda/bin:${PATH}"
+  CUDA_LIB_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
+elif [ -d "/usr/local/cuda-12.8/bin" ]; then
+  CUDA_BIN_PATH="/usr/local/cuda-12.8/bin:${PATH}"
+  CUDA_LIB_PATH="/usr/local/cuda-12.8/lib64:${LD_LIBRARY_PATH:-}"
+else
+  CUDA_BIN_PATH="${PATH}"
+  CUDA_LIB_PATH="${LD_LIBRARY_PATH:-}"
+fi
+
 cd "${CS_PATH}" && \
 source "${VENV_DIR}/bin/activate" && \
 pm2 start "${VENV_DIR}/bin/python3" \
@@ -922,8 +941,8 @@ pm2 start "${VENV_DIR}/bin/python3" \
   --miner.blacklist.force_validator_permit \
   --auto_update yes \
   --env "HOME=${HOME_DIR}" \
-  --env "PATH=/usr/local/cuda-12.8/bin:${PATH}" \
-  --env "LD_LIBRARY_PATH=/usr/local/cuda-12.8/lib64:${LD_LIBRARY_PATH:-}" \
+  --env "PATH=${CUDA_BIN_PATH}" \
+  --env "LD_LIBRARY_PATH=${CUDA_LIB_PATH}" \
   --output "${CS_PATH}/pm2_out.log" \
   --error "${CS_PATH}/pm2_error.log" \
   || abort "Failed to start miner process in PM2."
