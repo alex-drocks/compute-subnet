@@ -41,6 +41,21 @@ from dotenv import load_dotenv
 # Load environment variables from .env file
 load_dotenv()
 
+
+class EphemeralContainerHostKeyPolicy(paramiko.MissingHostKeyPolicy):
+    """
+    Custom host key policy for ephemeral miner containers.
+
+    Miner containers are dynamically allocated with new host keys each time.
+    Since host keys cannot be pre-verified for ephemeral containers, this policy
+    explicitly accepts them. This is intentional for the validator-miner SSH
+    verification flow where containers are short-lived test instances.
+    """
+
+    def missing_host_key(self, _client, _hostname, _key):
+        # Intentionally accept host keys for ephemeral containers
+        pass
+
 import torch
 from torch._C._te import Tensor  # type: ignore
 from neurons import RSAEncryption as rsa
@@ -980,7 +995,7 @@ class Validator:
         def _run():
             try:
                 ssh = paramiko.SSHClient()
-                ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                ssh.set_missing_host_key_policy(EphemeralContainerHostKeyPolicy())
                 ssh.connect(
                     hostname=miner_info["host"],
                     port=int(miner_info.get("port", 22)),

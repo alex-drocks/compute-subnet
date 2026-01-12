@@ -17,21 +17,27 @@ def _make_instance(hotkey: str, status: str = "pass", stats: dict | None = None)
 
 
 @pytest.mark.asyncio
-async def test_validate_single_skips_when_allocated():
+async def test_validate_single_validates_allocated_miners():
+    """PoGv3 validates all miners via test containers regardless of allocation state."""
     validator = Validator.__new__(Validator)
+    validator.ssh_public_key = "ssh-key"
     axon = SimpleNamespace(hotkey="hk-allocated", ip="127.0.0.1")
 
-    async def _alloc_should_not_run(*_args, **_kwargs):
-        raise AssertionError("allocate_miner should not run when miner is allocated")
+    # Mock allocation to return None (simulating test container allocation attempt)
+    async def _alloc_mock(*_args, **_kwargs):
+        return None
 
-    validator.allocate_miner = _alloc_should_not_run
+    validator.allocate_miner = _alloc_mock
 
     api_map = {axon.hotkey: [_make_instance(axon.hotkey, stats={"alloc_state": "allocated"})]}
 
-    res = await validator._validate_single(axon, api_map)
+    mock_dendrite = SimpleNamespace()
+    res = await validator._validate_single(axon, api_map, mock_dendrite)
 
-    assert res["skipped"] is True
-    assert res["skip_reason"] == "allocated"
+    # PoGv3 doesn't skip allocated miners - it validates via test containers
+    assert "skipped" not in res
+    assert res["alloc_state"] == "allocated"
+    assert res["allocation_ok"] is False  # Mock returned None
 
 
 @pytest.mark.asyncio
@@ -53,7 +59,8 @@ async def test_validate_single_rechecks_allocation_after_failure(monkeypatch):
     axon = SimpleNamespace(hotkey="hk-fail", ip="127.0.0.1")
     api_map = {axon.hotkey: [_make_instance(axon.hotkey)]}
 
-    res = await validator._validate_single(axon, api_map)
+    mock_dendrite = SimpleNamespace()
+    res = await validator._validate_single(axon, api_map, mock_dendrite)
 
     assert "skipped" not in res
     assert res["allocation_ok"] is False
