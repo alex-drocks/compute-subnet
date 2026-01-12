@@ -1,6 +1,8 @@
-# NI Compute (Subnet 27)
+# Nodexo Compute (Subnet 27)
 
-Welcome to the **Bittensor NI Compute Subnet** repository. This subnet powers a decentralized compute market, enabling **miners** to contribute GPU resources and earn rewards in return. **Validators** measure the performance of these miners and allocate GPU resources accordingly, ensuring an efficient, trustless, and permissionless compute market.
+Welcome to the **Bittensor Nodexo Compute Subnet** repository. This subnet powers a decentralized compute market, enabling **miners** to contribute GPU resources and earn rewards in return. **Validators** measure the performance of these miners and allocate GPU resources accordingly, ensuring an efficient, trustless, and permissionless compute market.
+
+---
 
 **Bittensor:** [Discord](https://discord.gg/bittensor) • [Network](https://taostats.io/) • [Research](https://bittensor.com/whitepaper)
 
@@ -48,17 +50,17 @@ Welcome to the **Bittensor NI Compute Subnet** repository. This subnet powers a 
 ## Introduction
 
 ### Decentralizing Compute
-**NI Compute** decentralizes GPU resources by weaving siloed pools of compute into a **trustless** market. This allows for scalable, on-demand GPU power, free from the constraints of centralized providers. Miners add GPU instances to the network, and validators ensure the reliability and performance of these resources.
+**Nodexo Compute** decentralizes GPU resources by weaving siloed pools of compute into a **trustless** market. This allows for scalable, on-demand GPU power, free from the constraints of centralized providers. Miners add GPU instances to the network, and validators ensure the reliability and performance of these resources.
 
 ### Subnet 27 and Bittensor
-**NI Compute** is powered by the **Bittensor** network. Bittensor is a blockchain that incentivizes resource providers (miners) who contribute machine intelligence services. In SN27, the resource is **GPU-based compute**, which is crucial for training and running machine learning workloads.
+**Nodexo Compute** is powered by the **Bittensor** network. Bittensor is a blockchain that incentivizes resource providers (miners) who contribute machine intelligence services. In SN27, the resource is **GPU-based compute**, which is crucial for training and running machine learning workloads.
 
 ---
 
 ## Key Resources
 
-- **NI Compute App (Rent GPUs)**
-  [Cloud Platform](https://app.neuralinternet.ai/)
+- **Nodexo Compute App (Rent GPUs)**
+  [Cloud Platform](https://console.nodexo.ai/)
 
 - **Subnet 27 (This Repo)**
   [GitHub: neuralinternet/SN27](https://github.com/neuralinternet/SN27)
@@ -677,7 +679,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
 
 ```
 The MIT License (MIT)
-© 2023 Neural Internet
+© 2023 Nodexo
 
 Permission is hereby granted, free of charge, to any person obtaining a copy of
 this software and associated documentation files (the “Software”), to deal in

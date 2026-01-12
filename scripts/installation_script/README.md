@@ -1,4 +1,4 @@
-# Bittensor & NI Compute Setup Guide (Two-Pass Installer)
+# Bittensor & Nodexo Compute Setup Guide (Two-Pass Installer)
 
 This guide explains how to install all necessary components (Docker, CUDA, NVIDIA Docker, Bittensor) and then set up the Compute-Subnet miner. You will run the unified installer script in two passes:
 
@@ -181,4 +181,5 @@ Using this approach, you ensure that all dependencies are in place and that you 
 
 - [Weights & Biases Documentation](https://docs.wandb.ai/)
 - [Bittensor Documentation](https://docs.bittensor.com/)
+- [Nodexo Documentation](https://docs.nodexo.ai/)
 - [SN27 Repository](https://github.com/neuralinternet/SN27)

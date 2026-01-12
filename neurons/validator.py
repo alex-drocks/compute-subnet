@@ -1410,7 +1410,7 @@ class Validator:
             except ConnectionRefusedError as e:
                 bt.logging.warning(
                     f"{axon.hotkey}: connection refused "
-                    f"(attempt {attempt}/{MAX_TRIES}) – {e}"
+                    f"(attempt {attempt}/{self._allocation_max_retries}) – {e}"
                 )
                 await self.pubsub_client.publish_miner_allocation(
                     miner_hotkey=axon.hotkey,
@@ -1500,9 +1500,9 @@ class Validator:
                         retry_count += 1
                         bt.logging.trace(
                             f"{axon.hotkey}: Failed to deallocate miner. "
-                            f"(attempt {retry_count}/{max_retries})"
+                            f"(attempt {retry_count}/{self._deallocation_max_retries})"
                         )
-                        if retry_count >= max_retries:
+                        if retry_count >= self._deallocation_max_retries:
                             bt.logging.trace(f"{axon.hotkey}: Max retries reached for deallocating miner.")
                         await asyncio.sleep(5)
                 except Exception as e:
@@ -1510,9 +1510,9 @@ class Validator:
                     deallocation_error = str(e)
                     bt.logging.trace(
                         f"{axon.hotkey}: Error while trying to deallocate miner. "
-                        f"(attempt {retry_count}/{max_retries}): {e}"
+                        f"(attempt {retry_count}/{self._deallocation_max_retries}): {e}"
                     )
-                    if retry_count >= max_retries:
+                    if retry_count >= self._deallocation_max_retries:
                         bt.logging.trace(f"{axon.hotkey}: Max retries reached for deallocating miner.")
                     await asyncio.sleep(5)
         except Exception as e:

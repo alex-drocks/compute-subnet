@@ -6,11 +6,11 @@ requires = [
 build-backend = "hatchling.build"
 
 [project]
-name = "NI-Compute"
-description="NI Compute Subnet"
+name = "Nodexo-Compute"
+description="Nodexo Compute Subnet"
 author="neuralinternet.ai"
 authors = [
-     {name = "Neural Internet"},
+     {name = "Nodexo"},
 ]
 readme = "README.md"
 license = {text = "MIT"}
@@ -72,11 +72,11 @@ dev = [
     "pre-commit",
     "pytest",
     "pytest-cov",
-    "allure-pytest"
+    "pytest-asyncio"
 ]
 
 [project.urls]
-Homepage = "https://neuralinternet.ai/"
+Homepage = "https://nodexo.ai/"
 Sponsor = "https://bittensor.org"
 History = "https://github.com/neuralinternet/ni-compute/releases"
 Tracker = "https://github.com/neuralinternet/ni-compute/issues"

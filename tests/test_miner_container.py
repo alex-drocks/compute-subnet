@@ -190,7 +190,7 @@ def mock_container_build(monkeypatch):
     patcher3 = mock.patch('neurons.Miner.container.rsa.encrypt_data', return_value=b"encrypted_data")
     patcher4 = mock.patch('neurons.Miner.container.psutil.virtual_memory', return_value=DummyVirtualMemory())
     #patcher5 = mock.patch('neurons.Miner.container.build_sample_container')
-    patcher6 = mock.patch('neurons.Miner.container.password_generator', return_value="testpwd")
+    # patcher6 removed - password_generator no longer exists in container.py
     patcher7 = mock.patch('neurons.Miner.container.exec_update_container_key')
 
     # Set module-level globals required by run_container.
@@ -203,13 +203,11 @@ def mock_container_build(monkeypatch):
     patcher3.start()
     patcher4.start()
     #patcher5.start()
-    patcher6.start()
     patcher7.start()
 
     yield
 
     patcher7.stop()
-    patcher6.stop()
     #patcher5.stop()
     patcher4.stop()
     patcher3.stop()
@@ -258,15 +256,12 @@ class TestRunContainer:
         _, kwargs = docker_client.containers.run.call_args
         assert kwargs.get("name") == "test_container"
 
-        # Verify both file writes occurred (dockerfile and allocation_key)
-        assert mock_open_fn.call_count == 2
+        # Verify file write occurred (allocation_key)
+        assert mock_open_fn.call_count == 1
         calls = mock_open_fn.call_args_list
-        # First call is for dockerfile
-        assert calls[0][0][0] == './tmp/dockerfile'
+        # Call is for allocation_key
+        assert calls[0][0][0] == 'allocation_key'
         assert calls[0][0][1] == 'w'
-        # Second call is for allocation_key
-        assert calls[1][0][0] == 'allocation_key'
-        assert calls[1][0][1] == 'w'
 
         expected_info = base64.b64encode(b"encrypted_data").decode("utf-8")
         assert result
@@ -297,7 +292,8 @@ class TestRunContainer:
         docker_requirement = {
             "image": "dummy_image",
             "ssh_key": "dummy_ssh_key",
-            "external_ports": {"ssh": 2222, "external": 8000},  # Specific external port to test
+            "external_ports": {"ssh": 2222},
+            "external_user_ports": {"27015": 8000},  # Specific external port to test
         }
         testing = True
 
@@ -322,8 +318,8 @@ class TestRunContainer:
         assert 27015 in actual_ports  # Internal user port
         assert actual_ports[27015] == 8000  # External port from external_user_ports
 
-        # Verify file operations (both dockerfile and allocation_key)
-        assert mock_open_fn.call_count == 2
+        # Verify file operations (allocation_key)
+        assert mock_open_fn.call_count == 1
 
         # Verify result structure
         expected_info = base64.b64encode(b"encrypted_data").decode("utf-8")
@@ -383,8 +379,8 @@ class TestRunContainer:
         #assert actual_ports[27015] is None
         # FIXME: not sure but I think we changed this logic - now it's only included if specified
 
-        # Verify file operations (both dockerfile and allocation_key)
-        assert mock_open_fn.call_count == 2
+        # Verify file operations (allocation_key)
+        assert mock_open_fn.call_count == 1
 
         # Verify result structure
         expected_info = base64.b64encode(b"encrypted_data").decode("utf-8")
