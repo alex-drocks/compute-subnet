@@ -50,11 +50,17 @@ class EphemeralContainerHostKeyPolicy(paramiko.MissingHostKeyPolicy):
     Since host keys cannot be pre-verified for ephemeral containers, this policy
     explicitly accepts them. This is intentional for the validator-miner SSH
     verification flow where containers are short-lived test instances.
+
+    Security note: This is safe for our use case because:
+    - Containers are ephemeral (new host key each allocation)
+    - Connection details (host/port/password) come from trusted miner response
+    - SSH is only used for GPU UUID verification, not sensitive operations
     """
 
-    def missing_host_key(self, _client, _hostname, _key):
-        # Intentionally accept host keys for ephemeral containers
-        pass
+    def missing_host_key(self, client, hostname, key):
+        # Accept and store host key for ephemeral container connection
+        # Security: Intentionally bypasses host key verification for ephemeral containers
+        client._host_keys.add(hostname, key.get_name(), key)
 
 import torch
 from torch._C._te import Tensor  # type: ignore
@@ -991,6 +997,7 @@ class Validator:
         Fetch primary GPU UUID and name over SSH. Returns (ok, uuid, name, num_gpus).
         """
         ssh_timeout = self._ssh_timeout_sec  # capture for closure
+        ssh_private_key = self.ssh_private_key  # capture for closure (key-based auth)
 
         def _run():
             try:
@@ -1000,7 +1007,7 @@ class Validator:
                     hostname=miner_info["host"],
                     port=int(miner_info.get("port", 22)),
                     username=miner_info["username"],
-                    password=miner_info["password"],
+                    pkey=ssh_private_key,  # Use key-based auth
                     timeout=ssh_timeout,
                 )
                 cmd = "nvidia-smi --query-gpu=uuid,name --format=csv,noheader,nounits"
@@ -1088,53 +1095,58 @@ class Validator:
             allocation_ok = False
         bt.logging.debug(f"[{hotkey[:8]}] allocation={'OK' if allocation_ok else 'FAIL'}")
 
-        if miner_info:
-            try:
-                ok, uuid_val, name_val, count_val = await self._fetch_remote_gpu(miner_info)
-                bt.logging.debug(f"[{hotkey[:8]}] SSH probe: ok={ok}, uuid={uuid_val}, gpu={name_val}, count={count_val}")
-                if ok:
-                    gpu_uuid = uuid_val
-            except Exception as e:
-                bt.logging.debug(f"[{hotkey[:8]}] SSH probe failed - {e}")
-
-        api_uuid = best_inst.primary_gpu_uuid if best_inst else None
-        uuid_match = (
-            gpu_uuid is not None
-            and best_inst is not None
-            and api_uuid is not None
-            and gpu_uuid == api_uuid
-        )
-        # Detailed UUID comparison logging
-        if not uuid_match and (gpu_uuid or api_uuid):
-            bt.logging.debug(
-                f"[{hotkey[:8]}] UUID mismatch: ssh={gpu_uuid} vs api={api_uuid}"
-            )
-        bt.logging.debug(f"[{hotkey[:8]}] uuid_match={uuid_match}, api_status={api_status}")
-
-        base_pass = allocation_ok and api_status == "pass" and uuid_match
-        health_ok = None
-        if base_pass and miner_info:
-            try:
-                health_ok = perform_health_check(axon, miner_info)
-            except Exception as e:
-                bt.logging.debug(f"{hotkey}: health check failed - {e}")
-                health_ok = False
-
-        passed = base_pass and (health_ok is not False)
-
-        if api_status == "pass":
-            base_score = 1.0 if passed else 0.0
-        elif api_status == "pending":
-            base_score = 1.0 if (allocation_ok and uuid_match) else 0.0
-        else:
-            base_score = 0.0
-        bt.logging.debug(f"[{hotkey[:8]}] passed={passed}, base_score={base_score}")
-
+        # Use try/finally to guarantee deallocation whenever allocation succeeds
         try:
+            if miner_info:
+                try:
+                    ok, uuid_val, name_val, count_val = await self._fetch_remote_gpu(miner_info)
+                    bt.logging.debug(f"[{hotkey[:8]}] SSH probe: ok={ok}, uuid={uuid_val}, gpu={name_val}, count={count_val}")
+                    if ok:
+                        gpu_uuid = uuid_val
+                except Exception as e:
+                    bt.logging.debug(f"[{hotkey[:8]}] SSH probe failed - {e}")
+
+            api_uuid = best_inst.primary_gpu_uuid if best_inst else None
+            uuid_match = (
+                gpu_uuid is not None
+                and best_inst is not None
+                and api_uuid is not None
+                and gpu_uuid == api_uuid
+            )
+            # Detailed UUID comparison logging
+            if not uuid_match and (gpu_uuid or api_uuid):
+                bt.logging.debug(
+                    f"[{hotkey[:8]}] UUID mismatch: ssh={gpu_uuid} vs api={api_uuid}"
+                )
+            bt.logging.debug(f"[{hotkey[:8]}] uuid_match={uuid_match}, api_status={api_status}")
+
+            base_pass = allocation_ok and api_status == "pass" and uuid_match
+            health_ok = None
+            if base_pass and miner_info:
+                try:
+                    health_ok = perform_health_check(axon, miner_info, self.ssh_private_key)
+                    bt.logging.debug(f"[{hotkey[:8]}] health_check={health_ok}")
+                except Exception as e:
+                    bt.logging.debug(f"[{hotkey[:8]}] health_check error: {e}")
+                    health_ok = False
+
+            passed = base_pass and (health_ok is not False)
+
+            if api_status == "pass":
+                base_score = 1.0 if passed else 0.0
+            elif api_status == "pending":
+                base_score = 1.0 if (allocation_ok and uuid_match) else 0.0
+            else:
+                base_score = 0.0
+            bt.logging.debug(f"[{hotkey[:8]}] passed={passed}, base_score={base_score}")
+        finally:
+            # Always deallocate if allocation succeeded, regardless of SSH/validation outcome
             if allocation_ok:
-                await self.deallocate_miner(axon, public_key, dendrite)
-        except Exception:
-            pass  # Test container cleanup is best-effort
+                try:
+                    await self.deallocate_miner(axon, public_key, dendrite)
+                    bt.logging.debug(f"[{hotkey[:8]}] deallocation completed")
+                except Exception as e:
+                    bt.logging.debug(f"[{hotkey[:8]}] deallocation failed - {e}")
 
         if gpu_count == 0 and best_inst is not None:
             gpu_count = api_gpu_count
@@ -1376,39 +1388,45 @@ class Validator:
 
                 if rsp and rsp.get("status", False):
                     # ---- decode allocator's reply -----------------------
-                    info_raw = rsp["info"]
-                    if private_key:
-                        # Old path: decrypt RSA encrypted response
-                        dec = rsa.decrypt_data(
-                            private_key.encode(),
-                            base64.b64decode(info_raw),
-                        )
-                        info = json.loads(dec)
-                    else:
-                        # New path: plain JSON (base64 encoded)
-                        info = json.loads(base64.b64decode(info_raw))
+                    try:
+                        info_raw = rsp["info"]
+                        if private_key:
+                            # Old path: decrypt RSA encrypted response
+                            dec = rsa.decrypt_data(
+                                private_key.encode(),
+                                base64.b64decode(info_raw),
+                            )
+                            info = json.loads(dec)
+                        else:
+                            # New path: plain JSON (base64 encoded)
+                            info = json.loads(base64.b64decode(info_raw))
 
-                    miner_info = {
-                        'host': axon.ip,
-                        'port': info['port'],
-                        'username': info['username'],
-                        'password': info['password'],
-                        'external_user_ports': info.get('external_user_ports', {}),
-                    }
-                    await self.pubsub_client.publish_miner_allocation(
-                        miner_hotkey=axon.hotkey,
-                        allocation_result=True,
-                    )
-                    bt.logging.trace(f"Successfully allocated miner {axon.hotkey}")
-                    return miner_info
+                        miner_info = {
+                            'host': axon.ip,
+                            'port': info['port'],
+                            'username': info['username'],
+                            'external_user_ports': info.get('external_user_ports', {}),
+                        }
+                        await self.pubsub_client.publish_miner_allocation(
+                            miner_hotkey=axon.hotkey,
+                            allocation_result=True,
+                        )
+                        return miner_info
+                    except Exception as decode_err:
+                        bt.logging.warning(f"[{axon.hotkey[:8]}] allocation decode failed: {decode_err}")
+                        await self.pubsub_client.publish_miner_allocation(
+                            miner_hotkey=axon.hotkey,
+                            allocation_result=False,
+                            allocation_error=f'Failed to decode allocation response: {decode_err}',
+                        )
+                        return None
 
                 # allocator politely said "busy" or returned invalid status
                 else:
                     if not rsp:
-                        bt.logging.trace(f"{axon.hotkey}: No response received for miner allocation.")
+                        bt.logging.debug(f"[{axon.hotkey[:8]}] No response received for allocation")
                     else:
-                        bt.logging.trace(f"{axon.hotkey}: Miner allocation request failed.")
-                        bt.logging.trace(f"{axon.hotkey}: Miner allocation response: {rsp}")
+                        bt.logging.debug(f"[{axon.hotkey[:8]}] allocation rejected: {rsp.get('message', 'no message')}")
 
                     await self.pubsub_client.publish_miner_allocation(
                         miner_hotkey=axon.hotkey,
