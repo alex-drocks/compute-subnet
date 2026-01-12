@@ -69,9 +69,9 @@ def purge_pog_stats(db: ComputeDb, hotkey: str) -> None:
     try:
         cur.execute("DELETE FROM pog_stats WHERE hotkey = ?", (hotkey,))
         db.conn.commit()
-        bt.logging.info(f"[Sybil-PoG] purged pog_stats for {hotkey}")
+        bt.logging.trace(f"[PoG] purged pog_stats for {hotkey}")
     except Exception as e:
-        bt.logging.error(f"[Sybil-PoG] purge error: {e}")
+        bt.logging.error(f"[PoG] purge error: {e}")
     finally:
         cur.close()
 

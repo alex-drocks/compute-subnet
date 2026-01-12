@@ -24,14 +24,15 @@ container_name = "ssh-container"  # Docker container name
 # Initialize Docker client
 
 
-# Kill the currently running container
+# Kill the currently running container (production only, not test containers)
 def kill_container():
     try:
         client = docker.from_env()
         containers = client.containers.list(all=True)
         running_container = None
         for container in containers:
-            if container_name in container.name:
+            # Use exact match to avoid killing ssh-test-container
+            if container.name == container_name:
                 running_container = container
                 break
         if running_container:

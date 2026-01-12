@@ -63,7 +63,7 @@ class SimpleTestServer:
 class PortValidator:
     """Simple port validator using external checking service"""
 
-    def __init__(self, ssh_port=4444, axon_port=8091, external_ports=None):
+    def __init__(self, ssh_port=4444, axon_port=8091, external_ports=None, test_ssh_port=None):
         if external_ports is None:
             external_ports = [27015, 27016, 27017, 27018]
 
@@ -72,11 +72,16 @@ class PortValidator:
             f'Axon ({axon_port})': axon_port,
         }
 
+        # Add test SSH port if specified
+        if test_ssh_port:
+            self.ports[f'Test SSH ({test_ssh_port})'] = test_ssh_port
+
         # Add multiple external ports
         for port in external_ports:
             self.ports[f'External ({port})'] = port
 
         self.ssh_port = ssh_port
+        self.test_ssh_port = test_ssh_port
         self.axon_port = axon_port
         self.external_ports = external_ports
         self.servers = {}
@@ -300,12 +305,15 @@ class PortValidator:
             print("   1. If on cloud hosting:")
             print("      - Check your provider's security groups/firewall rules")
             external_ports_str = ', '.join(str(p) for p in self.external_ports)
-            print(f"      - Ensure inbound rules allow TCP on ports {self.ssh_port}, {self.axon_port}, {external_ports_str}")
+            test_ssh_str = f", {self.test_ssh_port}" if self.test_ssh_port else ""
+            print(f"      - Ensure inbound rules allow TCP on ports {self.ssh_port}{test_ssh_str}, {self.axon_port}, {external_ports_str}")
             print("   2. If on home network:")
             print("      - Configure port forwarding on your router")
             print("      - Forward external ports to your machine's local IP")
             print("   3. Check local firewall:")
             print(f"      - Run: sudo ufw allow {self.ssh_port}/tcp")
+            if self.test_ssh_port:
+                print(f"      - Run: sudo ufw allow {self.test_ssh_port}/tcp")
             print(f"      - Run: sudo ufw allow {self.axon_port}/tcp")
             for port in self.external_ports:
                 print(f"      - Run: sudo ufw allow {port}/tcp")
@@ -316,20 +324,42 @@ class PortValidator:
 
 def main():
     import argparse
+    import os
+
+    # Load .env.miner if it exists (for default values)
+    env_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.env.miner')
+    if os.path.exists(env_file):
+        with open(env_file, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#') and '=' in line:
+                    key, value = line.split('=', 1)
+                    # Only set if not already in environment
+                    if key not in os.environ:
+                        os.environ[key] = value.strip().strip('"').strip("'")
+
+    # Get defaults from environment
+    default_ssh_port = int(os.environ.get('MINER_SSH_PORT', 4444))
+    default_test_ssh_port = int(os.environ.get('MINER_TEST_SSH_PORT', 4445))
 
     parser = argparse.ArgumentParser(
         description='Port validator for Subnet 27',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python3 validate_miner_ports.py                               # Use default ports
+  python3 validate_miner_ports.py                               # Use default ports (reads from .env.miner)
   python3 validate_miner_ports.py --ssh-port 2222               # Custom SSH port
   python3 validate_miner_ports.py --ssh-port 4444 --axon-port 8091 --external-ports 27015,27016,27017,27018
+  python3 validate_miner_ports.py --no-test-ssh                 # Skip test SSH port validation
         """
     )
 
-    parser.add_argument('--ssh-port', type=int, default=4444,
-                       help='SSH port (default: 4444)')
+    parser.add_argument('--ssh-port', type=int, default=default_ssh_port,
+                       help=f'SSH port for production allocations (default: {default_ssh_port} from env)')
+    parser.add_argument('--test-ssh-port', type=int, default=default_test_ssh_port,
+                       help=f'SSH port for test allocations/PoG validation (default: {default_test_ssh_port} from env)')
+    parser.add_argument('--no-test-ssh', action='store_true',
+                       help='Skip test SSH port validation')
     parser.add_argument('--axon-port', type=int, default=8091,
                        help='Axon port (default: 8091)')
     parser.add_argument('--external-ports', type=str, default='27015,27016,27017,27018',
@@ -340,15 +370,20 @@ Examples:
     # Parse external ports from comma-separated string to list of integers
     external_ports = [int(p.strip()) for p in args.external_ports.split(',')]
 
+    # Handle test SSH port - skip if --no-test-ssh flag is set
+    test_ssh_port = None if args.no_test_ssh else args.test_ssh_port
+
     print("\n🔧 Subnet 27 Port Validator")
     print("   This tool checks if your ports are accessible from the internet")
-    print(f"   Testing ports: SSH={args.ssh_port}, Axon={args.axon_port}, External={','.join(str(p) for p in external_ports)}")
+    test_port_str = f", Test SSH={test_ssh_port}" if test_ssh_port else ""
+    print(f"   Testing ports: SSH={args.ssh_port}{test_port_str}, Axon={args.axon_port}, External={','.join(str(p) for p in external_ports)}")
     print("   Press Ctrl+C to cancel at any time\n")
 
     validator = PortValidator(
         ssh_port=args.ssh_port,
         axon_port=args.axon_port,
-        external_ports=external_ports
+        external_ports=external_ports,
+        test_ssh_port=test_ssh_port
     )
 
     try:

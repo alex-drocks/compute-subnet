@@ -1,133 +1,90 @@
-# ─────────────────────── performance tables ──────────────────────────────
-gpu_performance:
-  GPU_TFLOPS_FP16:
-    NVIDIA B200: 1205
-    NVIDIA H200: 610
-    NVIDIA H100 80GB HBM3: 570
-    NVIDIA H100 PCIe: 330
-    NVIDIA H100 NVL: 218
-    NVIDIA A100-SXM4-80GB: 238.8
-    NVIDIA A100 80GB PCIe: 197
-    NVIDIA A100-SXM4-40GB: 257
-    NVIDIA GeForce RTX 5090: 220.0
-    NVIDIA L40S: 171
-    NVIDIA L40: 116
-    NVIDIA RTX 6000 Ada Generation: 112
-    NVIDIA RTX A6000: 48.5
-    NVIDIA RTX A5000: 60.0
-    NVIDIA RTX A4500: 44.0
-    NVIDIA RTX 4000 Ada Generation: 70
-    NVIDIA RTX A4000: 31.2
-    NVIDIA A40: 40.0
-    NVIDIA GeForce RTX 4090: 157
-    NVIDIA GeForce RTX 3090: 66.4
-    NVIDIA L4: 51
-  GPU_TFLOPS_FP32:
-    NVIDIA B200: 67.2
-    NVIDIA GeForce RTX 5090: 65.0
-    NVIDIA H200: 49.6
-    NVIDIA H100 80GB HBM3: 49.0
-    NVIDIA H100 PCIe: 37.2
-    NVIDIA H100 NVL: 32.0
-    NVIDIA A100-SXM4-80GB: 18.2
-    NVIDIA A100 80GB PCIe: 16.9
-    NVIDIA A100-SXM4-40GB: 18.2
-    NVIDIA L40S: 35.5
-    NVIDIA L40: 27.0
-    NVIDIA RTX 6000 Ada Generation: 26.0
-    NVIDIA RTX A6000: 21.28
-    NVIDIA GeForce RTX 3090: 21.7
-    NVIDIA RTX A5000: 15.8
-    NVIDIA RTX A4500: 14.3
-    NVIDIA RTX 4000 Ada Generation: 14.6
-    NVIDIA RTX A4000: 10.7
-    NVIDIA A40: 22.8
-    NVIDIA GeForce RTX 4090: 48.5
-    NVIDIA L4: 9
-  GPU_AVRAM:
-    NVIDIA B200: 68.72
-    NVIDIA H200: 68.72
-    NVIDIA H100 80GB HBM3: 34.36
-    NVIDIA H100 PCIe: 34.36
-    NVIDIA H100 NVL: 34.36
-    NVIDIA A100-SXM4-80GB: 34.36
-    NVIDIA A100 80GB PCIe: 34.36
-    NVIDIA A100-SXM4-40GB: 17.18
-    NVIDIA GeForce RTX 5090: 17.18
-    NVIDIA L40S: 17.18
-    NVIDIA L40: 17.18
-    NVIDIA RTX 6000 Ada Generation: 17.18
-    NVIDIA RTX A6000: 17.18
-    NVIDIA RTX A5000: 8.59
-    NVIDIA RTX A4500: 8.59
-    NVIDIA RTX 4000 Ada Generation: 8.59
-    NVIDIA RTX A4000: 8.59
-    NVIDIA A40: 17.18
-    NVIDIA GeForce RTX 4090: 8.59
-    NVIDIA GeForce RTX 3090: 8.59
-    NVIDIA L4: 8.59
+# ════════════════════════════════════════════════════════════════════
+# NETWORK
+# ════════════════════════════════════════════════════════════════════
+attestation_layer:
+  # Attestation Layer URL (centralized service for miner status, allocations, PoG results)
+  url: "http://135.181.63.200/v1"
+  # Auth token (can be overridden via environment variable)
+  auth_token: ""
+  # Timeout settings
+  connect_timeout_sec: 5
+  read_timeout_sec: 30
+  # Retry settings (used by validator only)
+  retry_max: 2
+  retry_base_sec: 0.5
+  retry_max_sec: 5.0
+  retry_statuses: "408,429,500,502,503,504"
+  # Cache TTL (used by validator only)
+  cache_ttl_sec: 300
 
-  gpu_tolerance_pairs:
-    NVIDIA L40s: NVIDIA L40S
-    NVIDIA RTX 4090: NVIDIA GeForce RTX 4090
-    NVIDIA H100": NVIDIA H100 PCIe
-    NVIDIA H100 NVL: NVIDIA H100 PCIe
-    NVIDIA H100 PCIe: NVIDIA H100 NVL
-    NVIDIA L40: NVIDIA RTX 6000 Ada Generation
-    NVIDIA RTX 6000 Ada Generation: NVIDIA L40
-    NVIDIA RTX 4000 Ada Generation: NVIDIA RTX A5000
-    NVIDIA RTX A5000: NVIDIA RTX 4000 Ada Generation
-    NVIDIA A100 80GB PCIe: NVIDIA A100-SXM4-80GB
-    NVIDIA A100-SXM4-80GB: NVIDIA A100 80GB PCIe
-    NVIDIA H100 80GB HBM3: NVIDIA H100
-    NVIDIA H100: NVIDIA H100 80GB HBM3
-    NVIDIA A40: NVIDIA RTX A6000
-    NVIDIA RTX A6000: NVIDIA A40
+chain:
+  network: "finney"
+  rpc_http: ""
+  rpc_wss: "wss://entrypoint-finney.opentensor.ai:443"
+  request_timeout_sec: 6
+  block_hash_cache: 1024
 
-  gpu_scores:
-    NVIDIA B200: 4.80
-    NVIDIA H200: 3.99
-    NVIDIA H100 NVL: 3.15
-    NVIDIA H100 80GB HBM3: 2.99
-    NVIDIA H100 PCIe: 2.79
-    NVIDIA A100-SXM4-80GB: 1.89
-    NVIDIA A100 80GB PCIe: 1.64
-    NVIDIA L40S: 1.03
-    NVIDIA GeForce RTX 5090: 0.92
-    NVIDIA RTX 6000 Ada Generation: 0.88
-    NVIDIA L40: 0.99
-    NVIDIA RTX A6000: 0.76
-    NVIDIA GeForce RTX 4090: 0.69
-    NVIDIA A40: 0.39
-    NVIDIA GeForce RTX 3090: 0.43
-    NVIDIA L4: 0.43
-    NVIDIA RTX A5000: 0.26
-    NVIDIA RTX A4500: 0.34
-    NVIDIA RTX A4000: 0.25
+# ════════════════════════════════════════════════════════════════════
+# MINER
+# ════════════════════════════════════════════════════════════════════
+miner:
+  # Block intervals (1 block ≈ 12 seconds on Bittensor)
+  block_interval_validator_update: 30    # ~6 minutes
+  block_interval_specs_update: 150       # ~30 minutes
+  block_interval_sync_status: 25         # ~5 minutes
+  block_interval_allocation_check: 15    # ~3 minutes
+  # Identity
+  wallet_name: "miner_wallet"
+  hotkey_name: "miner_hotkey"
+  # Runtime paths
+  run_root_path: "/dev/shm/miner"
+  poll_sec: 0.5
 
-# ───────────────── quadratic timing models (+ tolerance) ─────────────────
-gpu_time_models:
-  NVIDIA GeForce RTX 4090:            {a0: 5.58, a1: 2.31, a2: -0.14, tol: 1.30}
-  NVIDIA GeForce RTX 5090:            {a0: 6.16, a1: 3.24, a2:  -0.14, tol: 1.30}
-  NVIDIA A100 80GB PCIe:              {a0: 18.74, a1: 12.53, a2: -0.78, tol: 1.30}
-  NVIDIA L4:                          {a0: 13.89, a1: 1.09, a2:  0.00, tol: 1.30}
-  NVIDIA A40:                         {a0: 15.12, a1: 2.08, a2: -0.11, tol: 1.30}
-  NVIDIA L40:                         {a0: 11.60, a1: 4.96, a2: -0.31, tol: 1.30}
-  NVIDIA RTX 4000:                    {a0: 12.16, a1: 0.36, a2: 0.20, tol: 1.30}
-  NVIDIA RTX A4500:                   {a0: 10.86, a1: 0.33, a2:  0.00, tol: 1.30}
-  NVIDIA RTX A5000:                   {a0:  6.23, a1: 3.15, a2:  0.00, tol: 1.30}
-  NVIDIA RTX A6000:                   {a0:  6.00, a1: 6.38, a2: -0.28, tol: 1.30}
-  NVIDIA RTX 6000 Ada Generation:     {a0: 13.63, a1: 0.21, a2:  0.12, tol: 1.30}
-  NVIDIA L40S:                        {a0:  9.58, a1: 5.61, a2: -0.35, tol: 1.30}
-  NVIDIA A100-SXM4-80GB:              {a0: 31.32, a1: 1.80, a2:  0.22, tol: 1.30}
-  NVIDIA H100 PCIe:                   {a0: 12.28, a1:11.48, a2: -0.60, tol: 1.30}
-  NVIDIA H100 80GB HBM3:              {a0: 19.00, a1: 1.43, a2:  0.16, tol: 1.30}
-  NVIDIA H200:                        {a0: 32.55, a1: 5.28, a2: -0.23, tol: 1.30}
-  NVIDIA B200:                        {a0: 18.03, a1: 3.84, a2:  0.02, tol: 1.30}
-  NVIDIA H100 NVL:                    {a0: 23.46, a1: 0.30, a2:  0.23, tol: 1.30}
+  # Docker image security - whitelist of allowed images for allocation containers
+  # Images not in this list will be rejected. Supports exact matches and prefix patterns.
+  # Set to empty list [] to disable whitelist (DANGEROUS - allows any image)
+  docker_image_whitelist:
+    - "nirepo/default-pytorch:2.8.0-cuda12.8-cudnn9-runtime"  # Default image
+    - "nirepo/"  # Allow all images from nirepo registry (prefix match)
+    - "pytorch/pytorch:"  # Allow official PyTorch images (prefix match)
+    - "nvidia/cuda:"  # Allow official NVIDIA CUDA images (prefix match)
 
-# ─────────────────────── other runtime settings ─────────────────────────
-merkle_proof:
+# ════════════════════════════════════════════════════════════════════
+# VALIDATOR
+# ════════════════════════════════════════════════════════════════════
+validator:
+  # Block intervals
+  block_interval_hardware_info: 150      # ~30 minutes
+  block_interval_miner_check: 50         # ~10 minutes
+  block_interval_sync_status: 25         # ~5 minutes
+  block_interval_token_refresh: 600      # ~2 hours
+  # Timeouts (seconds)
+  pubsub_timeout_sec: 30
+  ssh_timeout_sec: 30
+  allocation_timeout_sec: 20
+  deallocation_timeout_sec: 15
+  # Retries
+  allocation_max_retries: 2
+  deallocation_max_retries: 3
+  retry_backoff_sec: 5
+  # Config server
+  server_ip: "65.108.33.88"
+  server_port: "8000"
+  pull_interval: 60
+
+# ════════════════════════════════════════════════════════════════════
+# PROOF OF GPU (PoG)
+# ════════════════════════════════════════════════════════════════════
+pog:
+  # Miner scheduling
+  exec_every_blocks: 5
+  finalized_cache_ttl_sec: 10
+  rpc_backoff_sec: 20
+  allocation_grace_sec: 120
+  # Validator scheduling
+  pog_interval_blocks: 25
+  batch_size: 64
+  # Merkle proof params
   miner_script_path: "neurons/Validator/miner_script_m_merkletree.py"
   time_tolerance: 5
   submatrix_size: 512
@@ -135,43 +92,164 @@ merkle_proof:
   spot_per_gpu: 3
   hash_algorithm: 'sha256'
   pog_retry_limit: 20
-  pog_retry_interval: 60  # seconds
+  pog_retry_interval: 60
   max_workers: 64
-  max_random_delay: 600 # 600 seconds
+  max_random_delay: 600
+  c_open_rows: 2
+  c_open_cols: 2
+  n_cap: 262144
+  # GPU compute settings
+  anchor_kind: heavy
+  buffer_micro: 0.001
+  buffer_heavy: 0.4
+  stream_micro_priority: 1
+  stream_heavy_priority: 0
+  # Confidential Compute Attestation (Intel TDX, NVIDIA CC)
+  cc_attestation_enabled: true
+  cc_attestation_mode: "mock"
 
-# ─────────────────────── subnet config parameters ───────────────────────
+# ════════════════════════════════════════════════════════════════════
+# GPU SPECIFICATIONS
+# ════════════════════════════════════════════════════════════════════
+gpu_performance:
+  GPU_AVRAM:
+    # Blackwell (B-series)
+    "NVIDIA B300": 288
+    "NVIDIA B200": 192
+    # Hopper (H-series)
+    "NVIDIA H200": 141
+    "NVIDIA H200 NVL": 141
+    "NVIDIA H100 80GB HBM3": 80
+    "NVIDIA H100 PCIe": 80
+    "NVIDIA H100 NVL": 94
+    # Ampere (A-series)
+    "NVIDIA A100-SXM4-80GB": 80
+    "NVIDIA A100 80GB PCIe": 80
+    "NVIDIA A100-SXM4-40GB": 40
+    "NVIDIA A100-PCIE-40GB": 40
+    "NVIDIA A40": 48
+    # Ada Lovelace / Professional
+    "NVIDIA L40S": 48
+    "NVIDIA L40": 48
+    "NVIDIA L4": 24
+    "NVIDIA RTX 6000 Ada Generation": 48
+    "NVIDIA RTX A6000": 48
+    "NVIDIA RTX A5000": 24
+    "NVIDIA RTX A4500": 20
+    "NVIDIA RTX 4000 Ada Generation": 20
+    "NVIDIA RTX A4000": 16
+    # Consumer GeForce
+    "NVIDIA GeForce RTX 5090": 32
+    "NVIDIA GeForce RTX 4090": 24
+    "NVIDIA GeForce RTX 4080 SUPER": 16
+    "NVIDIA GeForce RTX 4080": 16
+    "NVIDIA GeForce RTX 3090": 24
+
+  gpu_scores:
+    # Blackwell (B-series)
+    "NVIDIA B300": 6.00
+    "NVIDIA B200": 4.80
+    # Hopper (H-series)
+    "NVIDIA H200": 3.99
+    "NVIDIA H200 NVL": 3.50
+    "NVIDIA H100 80GB HBM3": 2.99
+    "NVIDIA H100 PCIe": 2.79
+    "NVIDIA H100 NVL": 3.15
+    # Ampere (A-series)
+    "NVIDIA A100-SXM4-80GB": 1.89
+    "NVIDIA A100 80GB PCIe": 1.64
+    "NVIDIA A100-SXM4-40GB": 1.50
+    "NVIDIA A100-PCIE-40GB": 1.30
+    "NVIDIA A40": 0.39
+    # Ada Lovelace / Professional
+    "NVIDIA L40S": 1.03
+    "NVIDIA L40": 0.99
+    "NVIDIA L4": 0.43
+    "NVIDIA RTX 6000 Ada Generation": 0.88
+    "NVIDIA RTX A6000": 0.76
+    "NVIDIA RTX A5000": 0.26
+    "NVIDIA RTX A4500": 0.34
+    "NVIDIA RTX 4000 Ada Generation": 0.35
+    "NVIDIA RTX A4000": 0.25
+    # Consumer GeForce
+    "NVIDIA GeForce RTX 5090": 0.92
+    "NVIDIA GeForce RTX 4090": 0.69
+    "NVIDIA GeForce RTX 4080 SUPER": 0.55
+    "NVIDIA GeForce RTX 4080": 0.50
+    "NVIDIA GeForce RTX 3090": 0.43
+
+gpu_time_models:
+  # Blackwell (B-series)
+  "NVIDIA B300":                        {a0: 12.00, a1: 2.50, a2:  0.02, tol: 1.30}
+  "NVIDIA B200":                        {a0: 18.03, a1: 3.84, a2:  0.02, tol: 1.30}
+  # Hopper (H-series)
+  "NVIDIA H200":                        {a0: 32.55, a1: 5.28, a2: -0.23, tol: 1.30}
+  "NVIDIA H200 NVL":                    {a0: 30.00, a1: 4.80, a2: -0.20, tol: 1.30}
+  "NVIDIA H100 80GB HBM3":              {a0: 19.00, a1: 1.43, a2:  0.16, tol: 1.30}
+  "NVIDIA H100 PCIe":                   {a0: 12.28, a1: 11.48, a2: -0.60, tol: 1.30}
+  "NVIDIA H100 NVL":                    {a0: 23.46, a1: 0.30, a2:  0.23, tol: 1.30}
+  # Ampere (A-series)
+  "NVIDIA A100-SXM4-80GB":              {a0: 31.32, a1: 1.80, a2:  0.22, tol: 1.30}
+  "NVIDIA A100 80GB PCIe":              {a0: 18.74, a1: 12.53, a2: -0.78, tol: 1.30}
+  "NVIDIA A100-SXM4-40GB":              {a0: 28.00, a1: 1.60, a2:  0.20, tol: 1.30}
+  "NVIDIA A100-PCIE-40GB":              {a0: 16.00, a1: 11.00, a2: -0.70, tol: 1.30}
+  "NVIDIA A40":                         {a0: 15.12, a1: 2.08, a2: -0.11, tol: 1.30}
+  # Ada Lovelace / Professional
+  "NVIDIA L40S":                        {a0:  9.58, a1: 5.61, a2: -0.35, tol: 1.30}
+  "NVIDIA L40":                         {a0: 11.60, a1: 4.96, a2: -0.31, tol: 1.30}
+  "NVIDIA L4":                          {a0: 13.89, a1: 1.09, a2:  0.00, tol: 1.30}
+  "NVIDIA RTX 6000 Ada Generation":     {a0: 13.63, a1: 0.21, a2:  0.12, tol: 1.30}
+  "NVIDIA RTX A6000":                   {a0:  6.00, a1: 6.38, a2: -0.28, tol: 1.30}
+  "NVIDIA RTX A5000":                   {a0:  6.23, a1: 3.15, a2:  0.00, tol: 1.30}
+  "NVIDIA RTX A4500":                   {a0: 10.86, a1: 0.33, a2:  0.00, tol: 1.30}
+  "NVIDIA RTX 4000 Ada Generation":     {a0: 12.16, a1: 0.36, a2:  0.20, tol: 1.30}
+  "NVIDIA RTX A4000":                   {a0: 12.00, a1: 0.40, a2:  0.00, tol: 1.30}
+  # Consumer GeForce
+  "NVIDIA GeForce RTX 5090":            {a0:  6.16, a1: 3.24, a2: -0.14, tol: 1.30}
+  "NVIDIA GeForce RTX 4090":            {a0:  5.58, a1: 2.31, a2: -0.14, tol: 1.30}
+  "NVIDIA GeForce RTX 4080 SUPER":      {a0:  7.00, a1: 2.50, a2: -0.14, tol: 1.30}
+  "NVIDIA GeForce RTX 4080":            {a0:  7.50, a1: 2.70, a2: -0.14, tol: 1.30}
+  "NVIDIA GeForce RTX 3090":            {a0:  8.00, a1: 3.00, a2: -0.14, tol: 1.30}
+
+# ════════════════════════════════════════════════════════════════════
+# SUBNET ECONOMICS
+# ════════════════════════════════════════════════════════════════════
 subnet_config:
   total_miner_emission: 0.05
   blocks_per_epoch: 360
   max_challenge_blocks: 11
   rand_delay_blocks_max: 5
-  allow_fake_sybil_slot: false
-  instant_validation: false
-  sybil_check_eligible_hotkeys:
-  - 5GmvyePN9aYErXBBhBnxZKGoGk4LKZApE4NkaSzW62CYCYNA
   reliability_weight: 0.5
+  # GPU weights: market-aligned ratios with +20% decentralization bonus for consumer GPUs
+  # Based on cloud rental prices (Jan 2026): H100~$3/hr, A100~$1.25/hr, RTX4090~$0.30/hr
   gpu_weights:
-    NVIDIA B200:                    23
-    NVIDIA H200:                    19
-    NVIDIA H100 80GB HBM3:          18
-    NVIDIA H100 PCIe:               16
-    NVIDIA H100 NVL:                15
-    NVIDIA A100-SXM4-80GB:          10
-    NVIDIA A100 80GB PCIe:          9
-    NVIDIA L40S:                    8
-    NVIDIA L40:                     7
-    NVIDIA A40:                     6
-    NVIDIA GeForce RTX 5090:        5
-    NVIDIA RTX 6000 Ada Generation: 4
-    NVIDIA RTX A6000:               3
-    NVIDIA RTX A5000:               2
-    NVIDIA RTX A4500:               2
+    # Enterprise tier (Blackwell & Hopper)
+    NVIDIA B300: 15
+    NVIDIA B200: 12
+    NVIDIA H200: 10
+    NVIDIA H200 NVL: 9
+    NVIDIA H100 80GB HBM3: 10
+    NVIDIA H100 PCIe: 9
+    NVIDIA H100 NVL: 8
+    # Datacenter tier (Ampere)
+    NVIDIA A100-SXM4-80GB: 4
+    NVIDIA A100 80GB PCIe: 4
+    NVIDIA A100-SXM4-40GB: 3
+    NVIDIA A100-PCIE-40GB: 3
+    NVIDIA L40S: 3
+    NVIDIA L40: 2.5
+    NVIDIA A40: 2
+    NVIDIA L4: 0.6
+    # Prosumer tier
+    NVIDIA RTX 6000 Ada Generation: 2
+    NVIDIA RTX A6000: 1.5
+    NVIDIA RTX A5000: 1.2
+    NVIDIA RTX A4500: 1.2
     NVIDIA RTX 4000 Ada Generation: 1
-    NVIDIA RTX A4000:               1.0
-    NVIDIA GeForce RTX 4090:        1
-    NVIDIA GeForce RTX 3090:        0.5
-    NVIDIA L4:                      0.5
-server_settings:
-  server_ip:      "65.108.33.88"
-  server_port:    "8000"
-  pull_interval:  60
+    NVIDIA RTX A4000: 1
+    # Consumer tier (+20% decentralization bonus)
+    NVIDIA GeForce RTX 5090: 1.8
+    NVIDIA GeForce RTX 4090: 1.2
+    NVIDIA GeForce RTX 4080 SUPER: 1
+    NVIDIA GeForce RTX 4080: 1
+    NVIDIA GeForce RTX 3090: 0.85
