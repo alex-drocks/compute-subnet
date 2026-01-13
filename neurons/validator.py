@@ -265,6 +265,7 @@ class Validator:
         self._deallocation_timeout_sec = int(vali_cfg.get("deallocation_timeout_sec", 15))
         self._allocation_max_retries = int(vali_cfg.get("allocation_max_retries", 2))
         self._deallocation_max_retries = int(vali_cfg.get("deallocation_max_retries", 3))
+        self._ssh_max_retries = int(vali_cfg.get("ssh_max_retries", 3))
         self._retry_backoff_sec = float(vali_cfg.get("retry_backoff_sec", 5))
 
         self.pubsub_client = PubSubClient(
@@ -520,6 +521,8 @@ class Validator:
             self._allocation_max_retries = v
         if (v := _safe_int("deallocation_max_retries", 3, min_val=0)) is not None:
             self._deallocation_max_retries = v
+        if (v := _safe_int("ssh_max_retries", 3, min_val=0)) is not None:
+            self._ssh_max_retries = v
         if (v := _safe_float("retry_backoff_sec", 5.0)) is not None:
             self._retry_backoff_sec = v
         if (v := _safe_int("pull_interval", 60)) is not None:
@@ -995,28 +998,32 @@ class Validator:
     async def _fetch_remote_gpu(self, miner_info: dict) -> tuple[bool, Optional[str], Optional[str], int]:
         """
         Fetch primary GPU UUID and name over SSH. Returns (ok, uuid, name, num_gpus).
+        Retries up to ssh_max_retries times with backoff on failure.
         """
-        ssh_timeout = self._ssh_timeout_sec  # capture for closure
-        ssh_private_key = self.ssh_private_key  # capture for closure (key-based auth)
+        ssh_timeout = self._ssh_timeout_sec
+        ssh_private_key = self.ssh_private_key
+        max_retries = self._ssh_max_retries
+        backoff_sec = self._retry_backoff_sec
+        host = miner_info.get("host", "unknown")
 
-        def _run():
+        def _single_attempt():
+            """Single SSH attempt - returns (ok, uuid, name, count) or raises."""
+            ssh = paramiko.SSHClient()
+            ssh.set_missing_host_key_policy(EphemeralContainerHostKeyPolicy())
             try:
-                ssh = paramiko.SSHClient()
-                ssh.set_missing_host_key_policy(EphemeralContainerHostKeyPolicy())
                 ssh.connect(
                     hostname=miner_info["host"],
                     port=int(miner_info.get("port", 22)),
                     username=miner_info["username"],
-                    pkey=ssh_private_key,  # Use key-based auth
+                    pkey=ssh_private_key,
                     timeout=ssh_timeout,
                 )
                 cmd = "nvidia-smi --query-gpu=uuid,name --format=csv,noheader,nounits"
                 stdin, stdout, stderr = ssh.exec_command(cmd, timeout=ssh_timeout)
                 out = stdout.read().decode().strip()
                 err = stderr.read().decode().strip()
-                ssh.close()
                 if err:
-                    bt.logging.debug(f"nvidia-smi error on miner {miner_info.get('host')}: {err}")
+                    bt.logging.debug(f"nvidia-smi error on miner {host}: {err}")
                 lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
                 if not lines:
                     return False, None, None, 0
@@ -1024,11 +1031,31 @@ class Validator:
                 uuid_val = first[0].strip() if len(first) >= 1 else None
                 name_val = first[1].strip() if len(first) >= 2 else None
                 return True, uuid_val or None, name_val or None, len(lines)
-            except Exception as e:
-                bt.logging.debug(f"SSH GPU probe failed: {e}")
-                return False, None, None, 0
+            finally:
+                ssh.close()
 
-        return await asyncio.to_thread(_run)
+        for attempt in range(1, max_retries + 1):
+            try:
+                result = await asyncio.to_thread(_single_attempt)
+                if result[0]:  # Success
+                    return result
+                # nvidia-smi returned empty - might be transient, retry
+                if attempt < max_retries:
+                    bt.logging.debug(
+                        f"SSH GPU probe empty response from {host} "
+                        f"(attempt {attempt}/{max_retries}), retrying..."
+                    )
+                    await asyncio.sleep(backoff_sec * attempt)
+            except Exception as e:
+                bt.logging.debug(
+                    f"SSH GPU probe failed for {host} "
+                    f"(attempt {attempt}/{max_retries}): {e}"
+                )
+                if attempt < max_retries:
+                    await asyncio.sleep(backoff_sec * attempt)
+
+        bt.logging.debug(f"SSH GPU probe exhausted all {max_retries} retries for {host}")
+        return False, None, None, 0
 
     async def _validate_with_uid(self, uid: int, axon: bt.AxonInfo, api_map: dict, dendrite):
         """Wrapper to include uid in result for parallel processing."""

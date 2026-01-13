@@ -66,6 +66,7 @@ validator:
   # Retries
   allocation_max_retries: 2
   deallocation_max_retries: 3
+  ssh_max_retries: 3
   retry_backoff_sec: 5
   # Config server
   server_ip: "65.108.33.88"
