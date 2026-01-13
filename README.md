@@ -4,8 +4,6 @@ Welcome to the **Bittensor Nodexo Compute Subnet** repository. This subnet power
 
 ---
 
-Welcome to the **Bittensor Nodexo Compute Subnet** repository. This subnet powers a decentralized compute market, enabling **miners** to contribute GPU resources and earn rewards in return. **Validators** measure the performance of these miners and allocate GPU resources accordingly, ensuring an efficient, trustless, and permissionless compute market.
-
 **Bittensor:** [Discord](https://discord.gg/bittensor) • [Network](https://taostats.io/) • [Research](https://bittensor.com/whitepaper)
 
 ---
@@ -24,24 +22,28 @@ Welcome to the **Bittensor Nodexo Compute Subnet** repository. This subnet power
    - [Prepare Project Repository](#prepare-project-repository)
    - [CUDA Toolkit and GPU Drivers](#cuda-toolkit-and-gpu-drivers)
    - [NVIDIA Docker Support](#nvidia-docker-support)
-   - [Install Python Dependencies (includes Bittensor)](#install-python-dependencies-includes-bittensor)
+   - [PoG3 CUDA Extension](#pog3-cuda-extension)
+   - [Install Python Dependencies](#install-python-dependencies-includes-bittensor)
    - [Create/Regenerate Keys](#create-or-regenerate-keys)
    - [WandB Setup](#wandb-setup)
    - [PM2 Setup](#pm2-setup)
-5. [Networking and Firewall](#networking-and-firewall)
-6. [Registering Your Hotkey](#registering-your-hotkey)
-7. [Running a Miner](#running-a-miner)
+5. [Configuration](#configuration)
+   - [Environment Variables](#environment-variables)
+   - [config.yaml](#configyaml)
+6. [Networking and Firewall](#networking-and-firewall)
+7. [Registering Your Hotkey](#registering-your-hotkey)
+8. [Running a Miner](#running-a-miner)
    - [Miner Options](#miner-options)
    - [Checking Miner Logs](#checking-miner-logs)
-8. [Running a Validator](#running-a-validator)
+9. [Running a Validator](#running-a-validator)
    - [Validator Options](#validator-options)
-9. [GPU Scoring](#gpu-scoring)
-10. [Resource Allocation Mechanism](#resource-allocation-mechanism)
-11. [Network Overview Diagram](#network-overview-diagram)
-12. [Troubleshooting](#troubleshooting)
-13. [Actions to Update](#actions-to-update)
-14. [Reward Program for Contributions](#reward-program-for-contributions)
-15. [License](#license)
+10. [GPU Scoring](#gpu-scoring)
+11. [Resource Allocation Mechanism](#resource-allocation-mechanism)
+12. [Network Overview Diagram](#network-overview-diagram)
+13. [Troubleshooting](#troubleshooting)
+14. [Updates](#updates)
+15. [Contributing](#contributing)
+16. [License](#license)
 
 ---
 
@@ -234,6 +236,26 @@ sudo apt-get install -y nvidia-container-toolkit
 sudo apt install -y nvidia-docker2
 ```
 
+### PoG3 CUDA Extension
+
+The PoG3 (Proof of GPU v3) validation protocol uses the `fused_prf_gemm_ext_fast` CUDA extension for GPU verification. This is **automatically installed** when you run `pip install .` for Python 3.10 or 3.11 on Linux x86_64.
+
+**Manual installation** (if needed):
+
+Using the install script:
+```bash
+./install/install_miner.sh
+```
+
+Or install the wheel directly:
+```bash
+# Python 3.10
+pip3 install install/wheels/fused_prf_gemm_ext_fast-0.1.0-cp310-cp310-linux_x86_64.whl
+
+# Python 3.11
+pip3 install install/wheels/fused_prf_gemm_ext_fast-0.1.0-cp311-cp311-linux_x86_64.whl
+```
+
 ### Install Python Dependencies (includes Bittensor)
 Now that CUDA and NVIDIA Docker are set up, we can safely install the Python dependencies:
 
@@ -324,11 +346,58 @@ pm2 ls
 
 ---
 
+## Configuration
+
+### Environment Variables
+
+Configuration is managed through environment files. Copy the templates and customize:
+
+**For Miners** (`.env.miner`):
+| Variable | Description | CLI Override |
+|----------|-------------|--------------|
+| `WANDB_API_KEY` | WandB API key for metrics logging | - |
+| `MINER_WALLET_NAME` | Wallet name | `--wallet.name` |
+| `MINER_HOTKEY_NAME` | Hotkey name | `--wallet.hotkey` |
+| `MINER_AXON_HOST` | External IP for axon | `--axon.external_ip` |
+| `MINER_AXON_PORT` | Axon port (default: 8091) | `--axon.port` |
+| `MINER_SSH_PORT` | SSH port for production allocations (default: 4444) | `--ssh.port` |
+| `MINER_TEST_SSH_PORT` | SSH port for test allocations/PoG validation (default: 4445) | `--ssh.test_port` |
+| `MINER_RPC_WSS` | WebSocket RPC endpoint | `--subtensor.chain_endpoint` |
+| `MINER_LOG_LEVEL` | Logging level (DEBUG/INFO) | - |
+| `VALIDATOR_API_AUTH_TOKEN` | API authentication token | - |
+
+**For Validators** (`.env.validator`):
+| Variable | Description |
+|----------|-------------|
+| `WANDB_API_KEY` | WandB API key |
+| `DEALLOCATION_NOTIFY_URL` | Webhook URL for deallocations |
+| `STATUS_NOTIFY_URL` | Webhook URL for status changes |
+| `SQLITE_DB_PATH` | Path to validator database |
+| `WEBHOOKS_SECRET` | Secret for webhook authentication |
+| `VALIDATOR_API_AUTH_TOKEN` | API authentication token |
+
+### config.yaml
+
+The `config.yaml` file contains network settings, GPU performance scores, and PoG3 validation parameters. Key sections:
+
+- **api**: Validator API URL, timeouts, retry settings
+- **chain**: Network endpoint configuration (finney/test)
+- **schedule**: Block timing for PoG validation
+- **gpu_performance**: GPU VRAM and scoring tables
+- **gpu_time_models**: Expected computation times per GPU model
+- **merkle_proof**: PoG3 validation parameters
+- **subnet_config**: Emission and weight configuration
+
+> **Note**: CLI arguments take precedence over environment variables, which take precedence over `config.yaml` values.
+
+---
+
 ## Networking and Firewall
 
 Your miner requires **multiple essential ports** to be opened:
 
-- **Port 4444 (SSH)**: Used by validators to access your miner for PoG (Proof of GPU) validation. Validators verify GPU functionality, available resources, and hardware specs through this port. **Required for miners to appear in the network.**
+- **Port 4444 (SSH)**: Used for production allocations. Clients access your miner through this port during active rentals. **Required for miners to appear in the network.**
+- **Port 4445 (Test SSH)**: Used by validators for PoG (Proof of GPU) validation test allocations. This separate port allows validators to verify GPU functionality even while your miner has an active production allocation. **Required for continuous PoG validation.**
 - **Port 8091 (Axon)**: Used for Bittensor validator-miner communication. **Critical for network functionality.**
 - **Ports 27015-27018 (External Ports)**: Multiple external ports that clients can use for their own purposes during allocations. **Validators verify these ports are accessible - if not open, miners will not appear in the dashboard or pass validation requirements.** Default ports are 27015, 27016, 27017, and 27018, but these can be customized.
 
@@ -350,7 +419,7 @@ This tool will:
 
 **Custom port testing:**
 ```bash
-python3 scripts/validate_miner_ports.py --ssh-port 4444 --axon-port 8091 --external-ports 27015,27016,27017,27018
+python3 scripts/validate_miner_ports.py --ssh-port 4444 --test-ssh-port 4445 --axon-port 8091 --external-ports 27015,27016,27017,27018
 ```
 
 The validator provides real-time feedback and troubleshooting guidance for:
@@ -363,7 +432,8 @@ The validator provides real-time feedback and troubleshooting guidance for:
 1. **Install and configure `ufw`**:
    ```bash
    sudo apt install ufw
-   sudo ufw allow 4444       # SSH port for PoG validation
+   sudo ufw allow 4444       # SSH port for production allocations
+   sudo ufw allow 4445       # SSH port for test allocations (PoG validation)
    sudo ufw allow 22/tcp     # Standard SSH
    sudo ufw allow 8091/tcp   # Axon port - can be customized
    sudo ufw allow 27015/tcp  # External port 1
@@ -430,7 +500,8 @@ pm2 start ./neurons/miner.py --name <MINER_NAME> --interpreter python3 -- \
   - Or use a custom endpoint, e.g. `subvortex.info:9944` (recommended)
 - **`--wallet.name`** & **`--wallet.hotkey`**: The coldkey/hotkey names you created [above](#create-or-regenerate-keys) and used in registration (btcli's defaults are `default` and `default` but both can be freely customized)
 - **`--axon.port`**: default 8091 can be replaced with any port number allowed by ufw as instructed [above](#networking-and-firewall) to serve your axon. Important for proper functionality and miner<->validator communication.
-- **`--ssh.port`**: A port opened with UFW as instructed [above](#networking-and-firewall) (e.g., 4444) used for allocating your miner via ssh.
+- **`--ssh.port`**: A port opened with UFW as instructed [above](#networking-and-firewall) (e.g., 4444) used for production allocations via ssh.
+- **`--ssh.test_port`**: A port opened with UFW as instructed [above](#networking-and-firewall) (default: 4445) used for test allocations during PoG validation.
 - **`--external.ports`**: Comma-separated list of external ports opened with UFW as instructed [above](#networking-and-firewall) (default: 27015,27016,27017,27018) that clients can use for their own purposes during allocations. Required for validation.
 - **`--auto-update`**: Enables automatic updating of the miner. When enabled, the miner will internally perform the update process (e.g., running `git pull`, installing dependencies, and restarting via PM2) so that no manual action is required.
 
@@ -508,32 +579,52 @@ pm2 start ./neurons/validator.py --name <VALIDATOR_NAME> --interpreter python3 -
 ---
 
 ## GPU Scoring
-**Subnet 27** uses a performance-based scoring system centered on GPU hardware. Below are **example base scores**:
+**Subnet 27** uses a performance-based scoring system centered on GPU hardware. Scores are defined in `config.yaml`:
 
-| GPU Model                        | Base Score |
-|---------------------------------|------------|
-| NVIDIA H200                      | 4.00       |
-| NVIDIA H100 80GB HBM3           | 3.30       |
-| NVIDIA H100                      | 2.80       |
-| NVIDIA A100-SXM4-80GB           | 1.90       |
+| GPU Model | Base Score | VRAM (GB) |
+|-----------|------------|-----------|
+| NVIDIA B200 | 4.80 | 192 |
+| NVIDIA H200 | 3.99 | 141 |
+| NVIDIA H100 NVL | 3.15 | 94 |
+| NVIDIA H100 80GB HBM3 | 2.99 | 80 |
+| NVIDIA H100 PCIe | 2.79 | 80 |
+| NVIDIA A100-SXM4-80GB | 1.89 | 80 |
+| NVIDIA A100 80GB PCIe | 1.64 | 80 |
+| NVIDIA L40S | 1.03 | 48 |
+| NVIDIA L40 | 0.99 | 48 |
+| NVIDIA GeForce RTX 5090 | 0.92 | 32 |
+| NVIDIA RTX 6000 Ada Generation | 0.88 | 48 |
+| NVIDIA RTX A6000 | 0.76 | 48 |
+| NVIDIA GeForce RTX 4090 | 0.69 | 24 |
+| NVIDIA L4 | 0.43 | 24 |
+| NVIDIA GeForce RTX 3090 | 0.43 | 24 |
+| NVIDIA A40 | 0.39 | 48 |
+| NVIDIA RTX A4500 | 0.34 | 20 |
+| NVIDIA RTX A5000 | 0.26 | 24 |
+| NVIDIA RTX A4000 | 0.25 | 16 |
 
-1. **Base GPU Score**: Tied to the GPU model.
+1. **Base GPU Score**: Tied to the GPU model (see `config.yaml` for latest values).
 2. **Scaling**: Up to 8 GPUs can be recognized. The top theoretical scenario (8 of the highest GPU model) is set to 50 points.
 
 ---
 
 ## Resource Allocation Mechanism
-Validators reserve resources from miners by specifying required CPU, GPU count, memory, etc. The subnet dynamically allocates and deallocates miner resources based on **availability** and **network demands**. Example resource request:
+
+Validators reserve resources from miners by specifying required CPU, GPU count, memory, etc. The subnet dynamically allocates and deallocates miner resources based on **availability** and **network demands**.
+
+Resource requests specify requirements like:
+```json
+{"cpu": {"count": 1}, "gpu": {"count": 1}, "hard_disk": {"capacity": 10737418240}, "ram": {"capacity": 1073741824}}
 ```
-{"cpu":{"count":1}, "gpu":{"count":1}, "hard_disk":{"capacity":10737418240}, "ram":{"capacity":1073741824}}
-```
+
+The PoG3 validation system verifies GPU availability and performance through cryptographic proofs, ensuring miners actually have the resources they claim.
 
 ---
 ## Network Overview Diagram
 ![Network Overview Diagram](docs/sn27_networkoverview1.png)
 
 ## Troubleshooting
-- **No requests received (no ‘Challenge’ or ‘Specs’ events)**:
+- **No requests received (no ‘Allocate’ events)**:
   - Check your open ports (default allocation port: 4444). Check your Axon port is open with your machine or cloud provider. Use `pm2 describe <PROCCESS_NAME>` and `pm2 show <PROCCESS_NAME>` to view the arguments you used to run your miner e.g. `--axon.port` and `--ssh.port` and check with `sudo ufw status` that the right ports are open with UFW as well.
   - Check your pm2 logs for any errors or tracebacks to help troubleshoot.
   - Ensure the miner is running properly and not blacklisted.
@@ -543,18 +634,19 @@ Validators reserve resources from miners by specifying required CPU, GPU count, 
   - Make sure scripts and Docker containers are running stably.
 
 ---
-## Actions To Update
+## Updates
 
-__**No action required when using auto-update flag**__.
+**Auto-update**: If `--auto_update yes` is enabled, no manual action is required.
 
-```sh
+**Manual update**:
+```bash
 git pull
-python -m pip install -r requirements.txt
-python -m pip install -e .
+pip install -r requirements.txt
+pip install -e .
 pm2 restart <id>
 ```
 
-## Verify Installation
+### Verify Installation
 
 You can verify the installation and check the version by running:
 
@@ -574,9 +666,11 @@ License: MIT
 
 ---
 
-## Reward Program for Contributions
-We encourage community involvement in improving **Compute Subnet**. A **bounty program** is in place to reward valuable contributions.
-See the **[Reward Program for Valuable Contributions](https://github.com/neuralinternet/SN27/blob/main/CONTRIBUTING.md)** for details.
+## Contributing
+
+We encourage community involvement in improving **NI Compute**. A **bounty program** is in place to reward valuable contributions.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
 
 
 ---

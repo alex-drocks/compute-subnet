@@ -16,6 +16,12 @@ jobs:
     name: Run Pytest Tests
     runs-on: ubuntu-latest
     steps:
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+          df -h
       - uses: actions/checkout@v4
 
       - name: Set up Python 3.12
@@ -37,4 +43,5 @@ jobs:
           pip install -e .[dev] -r requirements.txt -r requirements-dev.txt
 
       - name: Run Test
-        run: pytest
+        timeout-minutes: 10
+        run: pytest -v

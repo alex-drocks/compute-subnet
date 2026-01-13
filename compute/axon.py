@@ -364,6 +364,12 @@ class ComputeSubnetAxon(axon):
         self.router = APIRouter()
         self.app.include_router(self.router)
 
+        # Handle root path requests (empty synapse probes) silently
+        @self.app.get("/")
+        @self.app.post("/")
+        async def handle_root_probe():
+            return {"status": "ok"}
+
         # Build ourselves as the middleware.
         self.middleware_cls = ComputeSubnetAxonMiddleware
         self.app.add_middleware(self.middleware_cls, axon=self)
@@ -420,6 +426,25 @@ class ComputeSubnetAxonMiddleware(AxonMiddleware):
         axon (object): The axon instance used to process the requests.
         """
         super().__init__(app, axon=axon)
+
+    async def dispatch(
+        self, request: "Request", call_next: "RequestResponseEndpoint"
+    ) -> "Response":
+        """
+        Bypass the Axon synapse pipeline for non-synapse routes like `/` so simple probes/health-checks
+        don't generate `UnknownSynapseError` noise.
+        """
+        try:
+            path = request.url.path or ""
+            parts = path.split("/")
+            request_name = parts[1] if len(parts) > 1 else ""
+        except Exception:
+            request_name = ""
+
+        if request_name in ("", "favicon.ico", "robots.txt"):
+            return await call_next(request)
+
+        return await super().dispatch(request, call_next)
 
     async def preprocess(self, request: "Request") -> "Synapse":
         """
@@ -479,7 +504,7 @@ class ComputeSubnetAxonMiddleware(AxonMiddleware):
 
         # Fills the dendrite information into the synapse.
         synapse.dendrite.__dict__.update(
-            {"port": str(request.client.port), "ip": str(request.client.host)}  # type: ignore
+            {"port": request.client.port, "ip": str(request.client.host)}  # type: ignore
         )
 
         # Signs the synapse from the axon side using the wallet hotkey.

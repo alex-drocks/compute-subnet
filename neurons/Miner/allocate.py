@@ -22,16 +22,55 @@ import os
 from io import BytesIO
 
 from compute.utils.exceptions import make_error_response
-from neurons.Miner.container import kill_container, run_container, check_container, check_allocation_key, get_docker_images_list, get_deployed_container_info
+from neurons.Miner.container import (
+    kill_container,
+    run_container,
+    check_container,
+    check_allocation_key,
+    get_docker_images_list,
+    get_deployed_container_info,
+    kill_test_container_for_validator,
+    cleanup_stale_test_containers,
+    is_allocation_owner,
+    has_active_production_allocation,
+    wait_for_test_port,
+    cleanup_containers_on_port,
+    DEFAULT_TEST_SSH_PORT,
+)
 from neurons.Miner.schedule import start
 
 
 # Register for given timeline and device_requirement
-def register_allocation(timeline, device_requirement, public_key, docker_requirement: dict):
+def register_allocation(timeline, device_requirement, public_key, docker_requirement: dict, validator_hotkey: str | None = None, test_ssh_port: int = DEFAULT_TEST_SSH_PORT):
     # assuming allocation_status was checked before calling this
     # (it can still misfire sometimes when wandb is out of sync)
     try:
-        kill_container()  # this only kills test contaienr this way, no dereg mode
+        # Extract testing flag first to determine if we should kill test containers
+        testing = device_requirement.get("testing", False)
+
+        # Only kill test container when creating a NEW test container (not for production allocations)
+        # Production and test containers for the same validator can coexist on different ports
+        if testing:
+            # First, clean up any stale test containers (older than TTL)
+            # This is the inline watchdog for test containers
+            cleanup_stale_test_containers(max_age_seconds=10)
+
+            # Wait for port to be available (another test might be running)
+            # Tests typically complete in <5s, so 10s wait is generous
+            if not wait_for_test_port(test_ssh_port, timeout=10.0):
+                # Port still busy after waiting, force cleanup
+                bt.logging.warning(f"Test port {test_ssh_port} busy after waiting, forcing cleanup")
+                cleanup_containers_on_port(test_ssh_port)
+                # Give Docker a moment to release the port
+                import time
+                time.sleep(0.5)
+
+            # Kill this validator's old test container (if any)
+            if validator_hotkey:
+                kill_test_container_for_validator(validator_hotkey)
+            else:
+                # Legacy fallback: kill all test containers (shouldn't happen in normal flow)
+                kill_container(kill_test=True, validator_hotkey=None)
 
         # Extract requirements from device_requirement and format them
         cpu_count = device_requirement["cpu"]["count"]  # e.g 2
@@ -40,7 +79,6 @@ def register_allocation(timeline, device_requirement, public_key, docker_require
             cpu_assignment = "0"
         ram_capacity = device_requirement["ram"]["capacity"]  # e.g 5g
         hard_disk_capacity = device_requirement["hard_disk"]["capacity"]  # e.g 100g
-        testing = device_requirement.get("testing", False)
         if not device_requirement["gpu"]:
             gpu_capacity = 0
         else:
@@ -51,7 +89,7 @@ def register_allocation(timeline, device_requirement, public_key, docker_require
         ram_usage = {"capacity": str(int(ram_capacity / 1073741824)) + "g"}
         hard_disk_usage = {"capacity": str(int(hard_disk_capacity / 1073741824)) + "g"}
 
-        run_status = run_container(cpu_usage, ram_usage, hard_disk_usage, gpu_usage, public_key, docker_requirement, testing)
+        run_status = run_container(cpu_usage, ram_usage, hard_disk_usage, gpu_usage, public_key, docker_requirement, testing, validator_hotkey, test_ssh_port)
 
         if run_status["status"]:
             bt.logging.info("Successfully allocated container.")
@@ -78,7 +116,7 @@ def register_allocation(timeline, device_requirement, public_key, docker_require
 def deregister_allocation(public_key):
     try:
         file_path = 'allocation_key'
-        result = kill_container(public_key=public_key)
+        result = kill_container(public_key=public_key, kill_test=False)
 
         if result["status"]:
             # Remove the key from the file after successful deallocation

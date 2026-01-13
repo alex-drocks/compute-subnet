@@ -257,3 +257,6 @@ cert/
 
 # wandb
 wandb/
+
+# Keys
+allocation_key

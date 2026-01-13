@@ -9,6 +9,12 @@ jobs:
   pre-commit:
     runs-on: ubuntu-latest
     steps:
+    - name: Free up disk space
+      run: |
+        sudo rm -rf /usr/share/dotnet
+        sudo rm -rf /opt/ghc
+        sudo rm -rf /usr/local/share/boost
+        df -h
     - uses: actions/checkout@v4
     - uses: actions/setup-python@v5
       with:
@@ -21,3 +27,5 @@ jobs:
     - run: pip install -U pip\<25.3 pip-tools
     - run: pip install -e .[dev] -r requirements.txt -r requirements-dev.txt
     - uses: pre-commit/action@v3.0.1
+      env:
+        SKIP: pip-compile,pip-compile-dev
