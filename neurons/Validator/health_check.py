@@ -11,6 +11,21 @@ import time
 import bittensor as bt
 import requests
 
+
+class EphemeralContainerHostKeyPolicy(paramiko.MissingHostKeyPolicy):
+    """
+    Custom host key policy for ephemeral container connections.
+
+    Accepts and stores host keys without verification for containers that are
+    freshly created and have no pre-established trust relationship. This is
+    appropriate for ephemeral containers where the host key changes on each
+    container creation.
+    """
+    def missing_host_key(self, client, hostname, key):
+        # Accept and store host key for ephemeral container connection
+        client._host_keys.add(hostname, key.get_name(), key)
+
+
 def upload_health_check_script(ssh_client: paramiko.SSHClient, health_check_script_path: str) -> bool:
     """
     Uploads the health check script to the miner using SFTP.
@@ -85,14 +100,14 @@ def start_health_check_server_background(ssh_client: paramiko.SSHClient, port: i
             channel.close()
         return False, None
 
-def read_channel_output(channel: paramiko.Channel, hotkey: str = "") -> None:
+def read_channel_output(channel: paramiko.Channel, hk: str = "") -> None:
     """
     Reads and logs *all available* output from the channel's stdout and stderr streams
     without blocking indefinitely. This function is designed to drain the buffers.
 
     Args:
         channel: Paramiko channel object
-        hotkey (str): Hotkey for logging context
+        hk (str): Shortened hotkey for logging context
     """
     current_stdout = ""
     current_stderr = ""
@@ -108,15 +123,15 @@ def read_channel_output(channel: paramiko.Channel, hotkey: str = "") -> None:
 
         # Log any output found in this cycle
         if current_stdout:
-            bt.logging.trace(f"{hotkey}: Health check server stdout: {current_stdout.strip()}")
+            bt.logging.trace(f"[{hk}] server stdout: {current_stdout.strip()}")
         if current_stderr:
-            bt.logging.trace(f"{hotkey}: Health check server stderr: {current_stderr.strip()}")
+            bt.logging.trace(f"[{hk}] server stderr: {current_stderr.strip()}")
 
     except Exception as e:
-        bt.logging.trace(f"{hotkey}: Error reading channel output: {e}")
+        bt.logging.trace(f"[{hk}] error reading channel: {e}")
 
 
-def wait_for_port_ready(ssh_client: paramiko.SSHClient, port: int = 27015, timeout: int = 30, hotkey: str = "") -> bool:
+def wait_for_port_ready(ssh_client: paramiko.SSHClient, port: int = 27015, timeout: int = 30, hk: str = "") -> bool:
     """
     Waits for a health endpoint to become available using urllib.request.
 
@@ -127,7 +142,7 @@ def wait_for_port_ready(ssh_client: paramiko.SSHClient, port: int = 27015, timeo
         ssh_client (paramiko.SSHClient): SSH client connected to the miner
         port (int): Port to check
         timeout (int): Maximum time to wait in seconds
-        hotkey (str): Hotkey for logging context
+        hk (str): Shortened hotkey for logging context
 
     Returns:
         bool: True if health endpoint becomes available within timeout, False otherwise
@@ -138,21 +153,20 @@ def wait_for_port_ready(ssh_client: paramiko.SSHClient, port: int = 27015, timeo
     while time.time() - start_time < timeout:
         try:
             command = f'python3 -c \'import urllib.request; urllib.request.urlopen("http://127.0.0.1:{port}/", timeout=2)\''
-            bt.logging.trace(f"{hotkey}: Checking health endpoint on port {port} (path /)")
 
             stdin, stdout, stderr = ssh_client.exec_command(command)
             exit_status = stdout.channel.recv_exit_status()
 
             if exit_status == 0:
-                bt.logging.debug(f"{hotkey}: Health endpoint on port {port} (path /) is now responding")
+                bt.logging.trace(f"[{hk}] port {port} responding")
                 return True
 
         except Exception as e:
-            bt.logging.trace(f"{hotkey}: Error checking health endpoint: {e}")
+            bt.logging.trace(f"[{hk}] port check error: {e}")
 
         time.sleep(check_interval)
 
-    bt.logging.debug(f"{hotkey}: Health check server not responding on port {port} - server may not be running or port may be blocked by firewall")
+    bt.logging.trace(f"[{hk}] port {port} not responding after {timeout}s")
     return False
 
 def kill_health_check_server(ssh_client: paramiko.SSHClient, port: int = 27015) -> bool:
@@ -238,7 +252,8 @@ def wait_for_health_check(host: str, port: int, timeout: int = 30, retry_interva
 
 def perform_health_check(
     axon: bt.AxonInfo,
-    miner_info: dict[str, str | int]
+    miner_info: dict[str, str | int],
+    ssh_private_key=None
 ) -> bool:
     """
     Performs health check on a miner after POG has finished.
@@ -246,11 +261,13 @@ def perform_health_check(
     Args:
         axon: Axon information of the miner
         miner_info: Miner information (host, port, etc.) - always provided by POG
+        ssh_private_key: The validator's SSH private key for authentication
 
     Returns:
         bool: True if health check is successful, False otherwise
     """
     hotkey = axon.hotkey
+    hk = hotkey[:8]  # shortened for logging
     host: str | None = None
     ssh_client: paramiko.SSHClient | None = None
     channel: paramiko.Channel | None = None
@@ -260,19 +277,19 @@ def perform_health_check(
 
         # Connect via SSH
         ssh_client = paramiko.SSHClient()
-        ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh_client.set_missing_host_key_policy(EphemeralContainerHostKeyPolicy())
         try:
-            bt.logging.trace(f"{hotkey}: Attempting SSH connection to {host}")
-            ssh_client.connect(host, port=miner_info.get('port', 22), username=miner_info['username'], password=miner_info['password'], timeout=10)
-            bt.logging.trace(f"{hotkey}: SSH connection successful.")
+            bt.logging.trace(f"[{hk}] attempting SSH connection to {host}")
+            ssh_client.connect(host, port=miner_info.get('port', 22), username=miner_info['username'], pkey=ssh_private_key, timeout=10)
+            bt.logging.trace(f"[{hk}] SSH connection successful")
         except Exception as ssh_error:
-            bt.logging.debug(f"{hotkey}: SSH connection failed - miner may be offline or credentials incorrect: {ssh_error}")
+            bt.logging.debug(f"[{hk}] SSH connection failed: {ssh_error}")
             return False
 
         health_check_script_path = "neurons/Validator/health_check_server.py"
 
         if not upload_health_check_script(ssh_client, health_check_script_path):
-            bt.logging.debug(f"{hotkey}: Failed to upload health check script - miner may have insufficient disk space or permissions")
+            bt.logging.debug(f"[{hk}] failed to upload health check script")
             return False
 
         # Get external ports to validate
@@ -283,11 +300,11 @@ def perform_health_check(
         internal_ports = list(external_user_ports.keys())
 
         for internal_port in internal_ports:
-            bt.logging.trace(f"{hotkey}: Starting health check server in background on port {internal_port}.")
+            bt.logging.trace(f"[{hk}] starting health check server on port {internal_port}")
             server_started, channel = start_health_check_server_background(ssh_client, int(internal_port), timeout=60)
 
             if not server_started or channel is None:
-                bt.logging.debug(f"{hotkey}: Failed to start health check server on port {internal_port} - miner may have insufficient resources or Python not available")
+                bt.logging.debug(f"[{hk}] failed to start health check server on port {internal_port}")
                 # Close any previously opened channels
                 for ch in channels:
                     if ch and not ch.closed:
@@ -300,16 +317,16 @@ def perform_health_check(
 
         # Wait for all servers to be ready
         for internal_port in internal_ports:
-            bt.logging.debug(f"{hotkey}: Attempting to confirm health check server's internal readiness via port check on {internal_port}.")
-            if not wait_for_port_ready(ssh_client, int(internal_port), server_ready_timeout, hotkey):
-                bt.logging.debug(f"{hotkey}: Health check server on port {internal_port} failed to start properly - server may have crashed or port is blocked")
+            bt.logging.trace(f"[{hk}] checking health server readiness on port {internal_port}")
+            if not wait_for_port_ready(ssh_client, int(internal_port), server_ready_timeout, hk):
+                bt.logging.debug(f"[{hk}] health check server on port {internal_port} not ready")
                 # Close all channels
                 for ch in channels:
                     if ch and not ch.closed:
                         ch.close()
                 return False
 
-        bt.logging.debug(f"{hotkey}: All health check servers confirmed internally ready via port check.")
+        bt.logging.trace(f"[{hk}] all health check servers ready")
 
         health_check_timeout = 15
         health_check_retry_interval = 1
@@ -317,7 +334,7 @@ def perform_health_check(
         # Validate all external ports
         all_ports_valid = True
         for internal_port, external_port in external_user_ports.items():
-            bt.logging.trace(f"{hotkey}: Performing external HTTP health check on {host}:{external_port} (internal: {internal_port}).")
+            bt.logging.trace(f"[{hk}] HTTP health check {host}:{external_port}")
 
             health_check_success = wait_for_health_check(
                 host,
@@ -327,17 +344,17 @@ def perform_health_check(
             )
 
             if not health_check_success:
-                bt.logging.debug(f"{hotkey}: External health check failed for port {external_port} (internal: {internal_port}) - port may be blocked by firewall or miner is misconfigured")
+                bt.logging.debug(f"[{hk}] health check failed for port {external_port}")
                 all_ports_valid = False
                 break
             else:
-                bt.logging.trace(f"{hotkey}: Port {external_port} (internal: {internal_port}) validation successful.")
+                bt.logging.trace(f"[{hk}] port {external_port} OK")
 
         # Read output from all channels
         for channel in channels:
             if channel and not channel.closed:
-                bt.logging.trace(f"{hotkey}: Reading server output from channel.")
-                read_channel_output(channel, hotkey)
+                bt.logging.trace(f"[{hk}] reading server output")
+                read_channel_output(channel, hk)
 
         if not all_ports_valid:
             # Close all channels before returning
@@ -347,33 +364,31 @@ def perform_health_check(
             return False
 
         # Kill all health check servers
-        bt.logging.trace(f"{hotkey}: Health check successful. Attempting to kill all health check servers.")
+        bt.logging.trace(f"[{hk}] stopping health check servers")
         for internal_port in internal_ports:
             if kill_health_check_server(ssh_client, int(internal_port)):
-                bt.logging.trace(f"{hotkey}: Health check server on port {internal_port} successfully terminated.")
+                bt.logging.trace(f"[{hk}] server on port {internal_port} stopped")
             else:
-                bt.logging.debug(f"{hotkey}: Failed to explicitly kill health check server on port {internal_port}, but check was successful. It might be self-terminating.")
+                bt.logging.trace(f"[{hk}] server on port {internal_port} may self-terminate")
 
         # Read final output and close all channels
         for channel in channels:
             if channel and not channel.closed:
-                bt.logging.trace(f"{hotkey}: Reading final server output after termination.")
-                read_channel_output(channel, hotkey)
+                bt.logging.trace(f"[{hk}] reading final output")
+                read_channel_output(channel, hk)
                 channel.close()
 
         return True
 
     except Exception as e:
-        bt.logging.debug(f"{hotkey}: Unexpected error during health check - miner may be in an unstable state: {e}")
+        bt.logging.debug(f"[{hk}] health check error: {e}")
         return False
 
     finally:
         if ssh_client is not None:
             try:
                 if channel and not channel.closed:
-                    bt.logging.trace(f"{hotkey}: Closing Paramiko channel.")
                     channel.close()
                 ssh_client.close()
-                bt.logging.trace(f"{hotkey}: SSH connection closed.")
-            except Exception as e:
-                bt.logging.trace(f"{hotkey}: Error closing SSH connection or channel: {e}")
+            except Exception:
+                pass  # cleanup errors are not important

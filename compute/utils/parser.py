@@ -2,8 +2,6 @@ import argparse
 
 import bittensor as bt
 
-from compute import miner_hashcat_location, miner_hashcat_workload_profile
-
 
 class ComputeArgPaser(argparse.ArgumentParser):
     def __init__(self, description=None):
@@ -85,13 +83,6 @@ class ComputeArgPaser(argparse.ArgumentParser):
             default=True,
         )
         self.add_argument(
-            "--validator.challenge.batch.size",
-            type=int,
-            dest="validator_challenge_batch_size",
-            help="For lower hardware specifications you might want to use a different batch_size.",
-            default=256,
-        )
-        self.add_argument(
             "--validator.specs.batch.size",
             type=int,
             dest="validator_specs_batch_size",
@@ -122,27 +113,6 @@ class ComputeArgPaser(argparse.ArgumentParser):
 
     def add_miner_argument(self):
         self.add_argument(
-            "--miner.hashcat.path",
-            type=str,
-            dest="miner_hashcat_path",
-            help="The path of the hashcat binary.",
-            default=miner_hashcat_location,
-        )
-        self.add_argument(
-            "--miner.hashcat.workload.profile",
-            type=str,
-            dest="miner_hashcat_workload_profile",
-            help="Performance to apply with hashcat profile: 1 Low, 2 Economic, 3 High, 4 Insane. Run `hashcat -h` for more information.",
-            default=miner_hashcat_workload_profile,
-        )
-        self.add_argument(
-            "--miner.hashcat.extended.options",
-            type=str,
-            dest="miner_hashcat_extended_options",
-            help="Any extra options you found usefull to append to the hascat runner (I'd perhaps recommend -O). Run `hashcat -h` for more information.",
-            default="",
-        )
-        self.add_argument(
             "--miner.whitelist.not.enough.stake",
             action="store_true",
             dest="miner_whitelist_not_enough_stake",
@@ -168,7 +138,14 @@ class ComputeArgPaser(argparse.ArgumentParser):
             "--ssh.port",
             type=int,
             default=4444,
-            help="The ssh port for the allocation service.",
+            help="The ssh port for production allocations.",
+        )
+        # add test ssh port argument (for PoG validation)
+        self.add_argument(
+            "--ssh.test_port",
+            type=int,
+            default=4445,
+            help="The ssh port for test allocations (PoG validation).",
         )
         # add user ports argument
         self.add_argument(

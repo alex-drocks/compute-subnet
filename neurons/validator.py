@@ -26,23 +26,49 @@ import tempfile
 import threading
 import traceback
 import uuid
-import numpy as np
+from datetime import datetime
 from asyncio import AbstractEventLoop
-from typing import Dict, Tuple, List
+from typing import Dict, Tuple, List, Any, Optional
 from pathlib import Path
 
+import yaml
 import bittensor as bt
 import time
 import paramiko
 import requests
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
+
+
+class EphemeralContainerHostKeyPolicy(paramiko.MissingHostKeyPolicy):
+    """
+    Custom host key policy for ephemeral miner containers.
+
+    Miner containers are dynamically allocated with new host keys each time.
+    Since host keys cannot be pre-verified for ephemeral containers, this policy
+    explicitly accepts them. This is intentional for the validator-miner SSH
+    verification flow where containers are short-lived test instances.
+
+    Security note: This is safe for our use case because:
+    - Containers are ephemeral (new host key each allocation)
+    - Connection details (host/port/password) come from trusted miner response
+    - SSH is only used for GPU UUID verification, not sensitive operations
+    """
+
+    def missing_host_key(self, client, hostname, key):
+        # Accept and store host key for ephemeral container connection
+        # Security: Intentionally bypasses host key verification for ephemeral containers
+        client._host_keys.add(hostname, key.get_name(), key)
 
 import torch
 from torch._C._te import Tensor  # type: ignore
-import RSAEncryption as rsa
+from neurons import RSAEncryption as rsa
 import concurrent.futures
 from collections import defaultdict
 
-import Validator.app_generator as ag
+import neurons.Validator.app_generator as ag
 from compute import (
     SUSPECTED_EXPLOITERS_HOTKEYS,
     SUSPECTED_EXPLOITERS_COLDKEYS,
@@ -60,22 +86,58 @@ from compute.utils.parser import ComputeArgPaser
 from compute.utils.subtensor import is_registered, get_current_block, calculate_next_block_time
 from compute.utils.version import try_update, get_local_version, version2number, get_remote_version
 from compute.wandb.wandb import ComputeWandb
-from neurons.Validator.calculate_pow_score import calc_score_pog
 from neurons.Validator.database.allocate import update_miner_details, get_miner_details
 from neurons.Validator.database.miner import select_miners, purge_miner_entries, update_miners
 from neurons.Validator.health_check import perform_health_check
 from neurons.Validator.template_check import perform_template_check
-from neurons.Validator.pog import prng, adjust_matrix_size, compute_script_hash, execute_script_on_miner, get_random_seeds, load_yaml_config, parse_merkle_output, receive_responses, send_challenge_indices, send_script_and_request_hash, parse_benchmark_output, identify_gpu, send_seeds, verify_merkle_proof_row, get_remote_gpu_info, verify_responses, merkle_ok
-from neurons.Validator.database.pog import get_pog_specs, retrieve_stats, update_pog_stats, write_stats, purge_pog_stats
+from neurons.Validator.database.pog import retrieve_stats, update_pog_stats, write_stats, purge_pog_stats
+from neurons.Validator.api_client import ValidationApiClient, ApiInstance
+
+
+def load_yaml_config(path: str) -> dict:
+    """
+    Safely load a YAML config file and return a dict.
+    Returns {} on any error or if the root is not a mapping.
+    """
+    try:
+        with open(path, "r") as f:
+            data = yaml.safe_load(f) or {}
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _safe_merge(existing: dict, incoming: dict) -> dict:
+    """
+    Safely merge incoming config into existing config.
+    Only updates values that are non-empty in incoming.
+    Handles nested dicts recursively.
+
+    - Skip None values
+    - Skip empty dicts/lists/strings
+    - Preserve existing values when incoming is empty
+    """
+    if not isinstance(incoming, dict):
+        return existing
+    result = dict(existing) if existing else {}
+    for key, new_val in incoming.items():
+        old_val = result.get(key)
+        # Skip empty/None values - preserve existing
+        if new_val is None:
+            continue
+        if isinstance(new_val, dict) and not new_val:
+            continue
+        if isinstance(new_val, (list, str)) and len(new_val) == 0:
+            continue
+        # Recursive merge for nested dicts
+        if isinstance(new_val, dict) and isinstance(old_val, dict):
+            result[key] = _safe_merge(old_val, new_val)
+        else:
+            result[key] = new_val
+    return result
 
 class Validator:
     blocks_done: set = set()
-
-    pow_requests: dict = {}
-    pow_responses: dict = {}
-    pow_benchmark: dict = {}
-    new_pow_benchmark: dict = {}
-    pow_benchmark_success: dict = {}
 
     queryable_for_specs: dict = {}
     finalized_specs_once: bool = False
@@ -142,9 +204,22 @@ class Validator:
 
         # Set custom validator arguments
         self.validator_specs_batch_size = self.config.validator_specs_batch_size
-        self.validator_challenge_batch_size = self.config.validator_challenge_batch_size
         self.validator_perform_hardware_query = self.config.validator_perform_hardware_query
         self.validator_whitelist_updated_threshold = self.config.validator_whitelist_updated_threshold
+
+        # PoG cadence: parser config > env > config.yaml (pog.pog_interval_blocks) > default 25
+        # This is loaded early before full config_data is available
+        env_pog = os.getenv("POG_INTERVAL_BLOCKS")
+        try:
+            env_pog_val = int(env_pog) if env_pog else None
+        except Exception:
+            env_pog_val = None
+        try:
+            cfg_yaml = yaml.safe_load(open("config.yaml", "r")) or {}
+            cfg_pog_val = int(cfg_yaml.get("pog", {}).get("pog_interval_blocks", 25))
+        except Exception:
+            cfg_pog_val = 25
+        self.pog_interval_blocks = getattr(self.config, "pog_interval_blocks", None) or env_pog_val or cfg_pog_val or 25
 
         # Set up logging with the provided configuration and directory.
         bt.logging(config=self.config, logging_dir=self.config.full_path)
@@ -168,12 +243,39 @@ class Validator:
         self._metagraph = self.subtensor.metagraph(self.config.netuid)
         bt.logging.info(f"Metagraph: {self.metagraph}")
 
+        # STEP 2B: Init Proof of GPU
+        # Load configuration from YAML (before PubSubClient needs the values)
+        config_file = "config.yaml"
+        self.config_data = load_yaml_config(config_file)
+
+        # Bring everything else into memory on init, too
+        self.gpu_performance  = self.config_data.get("gpu_performance", {})
+        self.gpu_time_models  = self.config_data.get("gpu_time_models", {})
+        self.pog_config       = self.config_data.get("pog", {})
+
+        # Validator block intervals and timeouts from config.yaml
+        vali_cfg = self.config_data.get("validator", {})
+        self._block_interval_hardware_info = int(vali_cfg.get("block_interval_hardware_info", 150))
+        self._block_interval_miner_check = int(vali_cfg.get("block_interval_miner_check", 50))
+        self._block_interval_sync_status = int(vali_cfg.get("block_interval_sync_status", 25))
+        self._block_interval_token_refresh = int(vali_cfg.get("block_interval_token_refresh", 600))
+        self._pubsub_timeout_sec = float(vali_cfg.get("pubsub_timeout_sec", 30.0))
+        self._ssh_timeout_sec = int(vali_cfg.get("ssh_timeout_sec", 30))
+        self._allocation_timeout_sec = int(vali_cfg.get("allocation_timeout_sec", 20))
+        self._deallocation_timeout_sec = int(vali_cfg.get("deallocation_timeout_sec", 15))
+        self._allocation_max_retries = int(vali_cfg.get("allocation_max_retries", 2))
+        self._deallocation_max_retries = int(vali_cfg.get("deallocation_max_retries", 3))
+        self._retry_backoff_sec = float(vali_cfg.get("retry_backoff_sec", 5))
+
         self.pubsub_client = PubSubClient(
             wallet=self.wallet,
             config=self.config,
-            timeout=30.0,
-            auto_refresh_interval=600  # 30 minutes
+            timeout=self._pubsub_timeout_sec,
+            auto_refresh_interval=self._block_interval_token_refresh
         )
+
+        # Validation API client (PoG3)
+        self.api_client = ValidationApiClient(self.wallet)
 
         # Initialize the local db
         self.db = ComputeDb()
@@ -182,44 +284,33 @@ class Validator:
         # Initialize wandb
         self.wandb = ComputeWandb(self.config, self.wallet, os.path.basename(__file__))
 
-        # STEP 2B: Init Proof of GPU
-        # Load configuration from YAML
-        config_file = "config.yaml"
-        self.config_data = load_yaml_config(config_file)
-
-        # Bring everything else into memory on init, too
-        self.gpu_performance  = self.config_data.get("gpu_performance", {})
-        self.gpu_time_models  = self.config_data.get("gpu_time_models", {})
-        self.merkle_proof     = self.config_data.get("merkle_proof", {})
-
-        # ── server_settings ─────────────────────────────────────
-        srv = self.config_data.get("server_settings", {})
-        self.server_ip   = srv.get("server_ip",   "65.108.33.88")
-        self.server_port = srv.get("server_port", "8000")
+        # ── server_settings (now in validator section) ─────────────────────────────────────
+        self.server_ip   = vali_cfg.get("server_ip",   "65.108.33.88")
+        self.server_port = vali_cfg.get("server_port", "8000")
         self.server_url  = f"http://{self.server_ip}:{self.server_port}"
 
         self._last_cfg_pull    = 0.0
-        self._cfg_pull_interval = srv.get("pull_interval",300)
+        self._cfg_pull_interval = vali_cfg.get("pull_interval", 300)
 
         # immediately apply the disk‐based subnet_config
         self.refresh_config_from_server()
         self.load_subnet_config()
 
         cpu_cores = os.cpu_count() or 1
-        configured_max_workers = self.config_data["merkle_proof"].get("max_workers", 32)
+        configured_max_workers = self.config_data.get("pog", {}).get("max_workers", 32)
         safe_max_workers = min((cpu_cores + 4)*4, configured_max_workers)
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=safe_max_workers)
         self.results = {}
         self.gpu_task = None  # Track the GPU task
-
-        # Initialize allocated_hotkeys as an empty list
-        self.allocated_hotkeys = []
 
         # Initialize penalized_hotkeys as an empty list
         self.penalized_hotkeys = []
 
         # Initialize penalized_hotkeys_checklist as an empty list
         self.penalized_hotkeys_checklist = []
+
+        # Allocation sync tracking (for syncing to validation API)
+        self._allocation_sync_fail_count: int = 0  # Consecutive failure counter for logging
 
         # Step 3: Set up initial scoring weights for validation
         bt.logging.info("Building validation weights.")
@@ -299,10 +390,9 @@ class Validator:
 
     def refresh_config_from_server(self):
         """
-        Every `_cfg_pull_interval` seconds, fetch the latest JSON config
-        from your Streamlit/FastAPI endpoint and re‐apply *all* blocks.
+        Fetch latest config from server and safely merge all sections.
+        Only updates non-empty values, preserving local config when remote is empty.
         """
-
         # Skip remote config refresh if running on testnet
         if str(getattr(self.config.subtensor, "network", "")).lower() == "test":
             bt.logging.debug("Testnet detected — skipping remote config refresh.")
@@ -316,7 +406,7 @@ class Validator:
         try:
             r = requests.get(f"{self.server_url}/config", timeout=5)
             if r.status_code != 200:
-                bt.logging.warning(f"Could not fetch config: HTTP {r.status_code}")
+                bt.logging.warning(f"Config fetch failed: HTTP {r.status_code}")
                 return
 
             new_cfg = r.json().get("config", {})
@@ -324,18 +414,31 @@ class Validator:
                 bt.logging.warning("Remote config payload was not a dict")
                 return
 
-            # replace our in‐memory YAML dump
-            self.config_data.update(new_cfg)
+            # Safe merge into config_data (preserves local values if remote is empty)
+            self.config_data = _safe_merge(self.config_data, new_cfg)
 
-            # re‐load each section
+            # Reload each section with validation
             self.load_subnet_config()
-            self.gpu_performance = new_cfg.get("gpu_performance", {})
-            self.gpu_time_models = new_cfg.get("gpu_time_models", {})
-            self.merkle_proof    = new_cfg.get("merkle_proof", {})
+            self._load_validator_config()
+            self._load_pog_config()
 
-            bt.logging.info("🔄 Loaded updated config from server.")
+            # GPU configs (safe merge)
+            if new_cfg.get("gpu_performance"):
+                self.gpu_performance = _safe_merge(
+                    self.gpu_performance, new_cfg["gpu_performance"]
+                )
+            if new_cfg.get("gpu_time_models"):
+                self.gpu_time_models = _safe_merge(
+                    self.gpu_time_models, new_cfg["gpu_time_models"]
+                )
+
+            # Reload attestation layer config in api_client if present
+            if new_cfg.get("attestation_layer"):
+                self.api_client.reload_config()
+
+            bt.logging.debug("Config refresh complete")
         except Exception as e:
-            bt.logging.warning(f"Error refreshing config: {e}")
+            bt.logging.warning(f"Config refresh error: {e}")
 
     def load_subnet_config(self):
         subnet_config = self.config_data.get("subnet_config", {})
@@ -372,6 +475,75 @@ class Validator:
         bt.logging.debug(f"🔧 Loaded subnet config:")
         bt.logging.debug(f"  total_miner_emission = {self.total_miner_emission}")
 
+    def _load_validator_config(self):
+        """Reload validator section config. Only updates valid non-empty values."""
+        vali_cfg = self.config_data.get("validator", {})
+        if not isinstance(vali_cfg, dict) or not vali_cfg:
+            return
+
+        def _safe_int(key, default, min_val=1):
+            if key in vali_cfg:
+                try:
+                    val = int(vali_cfg[key])
+                    return val if val >= min_val else default
+                except (ValueError, TypeError):
+                    pass
+            return None  # None means don't update
+
+        def _safe_float(key, default, min_val=0.0):
+            if key in vali_cfg:
+                try:
+                    val = float(vali_cfg[key])
+                    return val if val > min_val else default
+                except (ValueError, TypeError):
+                    pass
+            return None
+
+        # Update each value only if present and valid
+        if (v := _safe_int("block_interval_hardware_info", 150)) is not None:
+            self._block_interval_hardware_info = v
+        if (v := _safe_int("block_interval_miner_check", 50)) is not None:
+            self._block_interval_miner_check = v
+        if (v := _safe_int("block_interval_sync_status", 25)) is not None:
+            self._block_interval_sync_status = v
+        if (v := _safe_int("block_interval_token_refresh", 600)) is not None:
+            self._block_interval_token_refresh = v
+        if (v := _safe_float("pubsub_timeout_sec", 30.0)) is not None:
+            self._pubsub_timeout_sec = v
+        if (v := _safe_int("ssh_timeout_sec", 30)) is not None:
+            self._ssh_timeout_sec = v
+        if (v := _safe_int("allocation_timeout_sec", 20)) is not None:
+            self._allocation_timeout_sec = v
+        if (v := _safe_int("deallocation_timeout_sec", 15)) is not None:
+            self._deallocation_timeout_sec = v
+        if (v := _safe_int("allocation_max_retries", 2, min_val=0)) is not None:
+            self._allocation_max_retries = v
+        if (v := _safe_int("deallocation_max_retries", 3, min_val=0)) is not None:
+            self._deallocation_max_retries = v
+        if (v := _safe_float("retry_backoff_sec", 5.0)) is not None:
+            self._retry_backoff_sec = v
+        if (v := _safe_int("pull_interval", 60)) is not None:
+            self._cfg_pull_interval = v
+
+    def _load_pog_config(self):
+        """Reload PoG section config. Only updates valid non-empty values."""
+        pog_cfg = self.config_data.get("pog", {})
+        if not isinstance(pog_cfg, dict):
+            return
+
+        # Merge full dict (preserves local keys not in remote)
+        if pog_cfg:
+            self.pog_config = _safe_merge(self.pog_config, pog_cfg)
+
+        # Extract specific values with validation
+        if "pog_interval_blocks" in pog_cfg:
+            try:
+                val = int(pog_cfg["pog_interval_blocks"])
+                if val > 0:
+                    self.pog_interval_blocks = val
+            except (ValueError, TypeError):
+                pass
+
     @staticmethod
     def pretty_print_dict_values(items: dict):
         for key, values in items.items():
@@ -400,7 +572,7 @@ class Validator:
                 id, hotkey, details = row
                 hotkey_list.append(hotkey)
         except Exception as e:
-            bt.logging.info(f"An error occurred while retrieving allocation details: {e}")
+            bt.logging.warning(f"An error occurred while retrieving allocation details: {e}")
         finally:
             cursor.close()
 
@@ -408,39 +580,47 @@ class Validator:
         try:
             self.wandb.update_allocated_hotkeys(hotkey_list, self.penalized_hotkeys)
         except Exception as e:
-            bt.logging.info(f"Error updating wandb : {e}")
+            bt.logging.warning(f"Error updating wandb: {e}")
 
     def sync_scores(self):
-        # 1) Fetch local stats from DB and miner details
-        self.stats = retrieve_stats(self.db)
+        # 1) Fetch latest PoG3 scores from DB and miner details
+        existing_stats = retrieve_stats(self.db)
         miner_details_all = get_miner_details(self.db)
 
-        # 2) Identify valid validators (used for signature filtering)
-        valid_validator_hotkeys = self.get_valid_validator_hotkeys()
+        # 2) Refresh queryable miners and reliability / penalization maps
+        self._queryable_uids = self.get_queryable()
+        try:
+            valid_validator_hotkeys = self.get_valid_validator_hotkeys()
+        except Exception as e:
+            bt.logging.warning(f"Failed to compute valid validator hotkeys for penalization: {e}")
+            valid_validator_hotkeys = []
+        try:
+            reliability_by_uid = self.wandb.get_reliability_scores()
+        except Exception as e:
+            bt.logging.warning(f"Failed to fetch reliability scores from wandb: {e}")
+            reliability_by_uid = {}
+        try:
+            penalized_hotkeys = self.wandb.get_penalized_hotkeys_checklist(valid_validator_hotkeys, True)
+        except Exception as e:
+            bt.logging.warning(f"Failed to fetch penalized hotkeys from wandb: {e}")
+            penalized_hotkeys = set()
 
-        # 3) Publish our current stats to W&B
-        self.update_allocation_wandb()
-
-        # 4) Pull distributed allocation+penalties and the reliability map
-        self.allocated_hotkeys = self.wandb.get_allocated_hotkeys(valid_validator_hotkeys, True)
-        self.stats_allocated   = self.wandb.get_stats_allocated(valid_validator_hotkeys, True)
-        penalized_hotkeys      = self.wandb.get_penalized_hotkeys_checklist(valid_validator_hotkeys, True)
-        self._queryable_uids   = self.get_queryable()
-        reliability_by_uid = self.wandb.get_reliability_scores()
-
-        # 5) Compute scores per UID
+        # 4) Compute final scores per UID (PoG3 base + reliability)
+        self.stats = {}
         for uid in self.uids:
             try:
+                hotkey = self.metagraph.axons[uid].hotkey
+
                 # Unqueryable → zero out, clean PoG stats
                 if uid not in self._queryable_uids:
-                    hotkey = self.metagraph.axons[uid].hotkey
+                    prev = existing_stats.get(uid, {})
                     self.stats[uid] = {
                         "hotkey": hotkey,
-                        "allocated": hotkey in self.allocated_hotkeys,
+                        "allocated": bool(prev.get("allocated", False)),
                         "own_score": True,
-                        "score": 0,
+                        "score": 0.0,
                         "gpu_specs": None,
-                        "reliability_score": self.stats.get(uid, {}).get("reliability_score", 0.0),
+                        "reliability_score": float(prev.get("reliability_score", 0.0)),
                     }
                     self.scores[uid] = 0.0
                     cursor = self.db.get_cursor()
@@ -448,35 +628,13 @@ class Validator:
                     cursor.close()
                     continue
 
-                axon = self._queryable_uids[uid]
-                hotkey = axon.hotkey
-                self.stats.setdefault(uid, {})
-                self.stats[uid]["hotkey"] = hotkey
-                self.stats[uid]["allocated"] = hotkey in self.allocated_hotkeys
-
-                # GPU specs & base score
-                gpu_specs = get_pog_specs(self.db, hotkey)
-                if gpu_specs is not None:
-                    base_score = calc_score_pog(gpu_specs, hotkey, self.allocated_hotkeys, self.config_data)
-                    self.stats[uid]["own_score"] = True
-                else:
-                    if uid in self.stats_allocated and isinstance(self.stats_allocated[uid].get("gpu_specs"), dict):
-                        gpu_specs = self.stats_allocated[uid].get("gpu_specs")
-                        base_score = float(self.stats_allocated[uid].get("score", 0.0))
-                        self.stats[uid]["own_score"] = False
-                    else:
-                        gpu_specs = None
-                        base_score = 0.0
-                        self.stats[uid]["own_score"] = True
-
-                # Penalties / missing miner details force zero
-                if (hotkey in penalized_hotkeys
-                    or not isinstance(miner_details_all.get(hotkey), dict)
-                    or not miner_details_all.get(hotkey)):
-                    base_score = 0.0
+                prev = existing_stats.get(uid, {})
+                base_score = float(prev.get("score", 0.0)) / 100.0
+                gpu_specs = prev.get("gpu_specs")
+                allocated_flag = bool(prev.get("allocated", False))
 
                 # Reliability score: prefer W&B aggregate, else keep local value, else neutral 1.0
-                rel = reliability_by_uid.get(uid, self.stats[uid].get("reliability_score", 1.0))
+                rel = reliability_by_uid.get(uid, prev.get("reliability_score", 1.0))
                 try:
                     rel = float(rel)
                 except Exception:
@@ -491,10 +649,23 @@ class Validator:
                 # Apply reliability score
                 final_score = float(base_score) * rel_multiplier
 
+                # Penalization / missing miner details force zero
+                if (
+                    hotkey in penalized_hotkeys
+                    or not isinstance(miner_details_all.get(hotkey), dict)
+                    or not miner_details_all.get(hotkey)
+                ):
+                    final_score = 0.0
+
                 # Store
-                self.stats[uid]["score"] = final_score * 100.0
-                self.stats[uid]["gpu_specs"] = gpu_specs
-                self.stats[uid]["reliability_score"] = rel
+                self.stats[uid] = {
+                    "hotkey": hotkey,
+                    "allocated": allocated_flag,
+                    "own_score": True,
+                    "score": final_score * 100.0,
+                    "gpu_specs": gpu_specs,
+                    "reliability_score": rel,
+                }
                 self.scores[uid] = final_score
 
             except KeyError as e:
@@ -511,18 +682,27 @@ class Validator:
             except Exception as e:
                 bt.logging.warning(f"Unexpected exception for UID {uid}: {str(e)}")
                 self.scores[uid] = 0.0
-                self.stats.setdefault(uid, {})
-                self.stats[uid]["score"] = 0.0
-                self.stats[uid]["reliability_score"] = 0.0
+                self.stats[uid] = {
+                    "hotkey": self.metagraph.axons[uid].hotkey if uid < len(self.metagraph.axons) else "unknown",
+                    "allocated": False,
+                    "own_score": True,
+                    "score": 0.0,
+                    "gpu_specs": None,
+                    "reliability_score": 0.0,
+                }
 
-        # 6) Persist and re-push
+        # 5) Persist and re-push
         write_stats(self.db, self.stats)
         self.update_allocation_wandb()
 
-        # 7) Logging
-        bt.logging.info("-" * 190)
-        bt.logging.info("MINER STATS SUMMARY".center(190))
-        bt.logging.info("-" * 190)
+        # 6) Logging - Summary at INFO, full table at DEBUG
+        allocated_count = sum(1 for d in self.stats.values() if d.get("allocated"))
+        scored_count = sum(1 for d in self.stats.values() if d.get("score", 0) > 0)
+        bt.logging.info("-" * 80)
+        bt.logging.info(f"MINER STATS: Total={len(self.stats)} | Allocated={allocated_count} | Scored={scored_count}")
+        bt.logging.info("-" * 80)
+
+        # Full per-miner table at DEBUG level only
         for uid, data in self.stats.items():
             hotkey_str = str(data.get("hotkey", "unknown"))
             gpu_specs = data.get("gpu_specs")
@@ -534,16 +714,9 @@ class Validator:
                 gpu_str = "N/A"
             score_str = f"{float(data.get('score', 0.0)):.2f}"
             allocated = "yes" if data.get("allocated", False) else "no"
-            reliability_score = data.get("reliability_score", 0.0)
-            source = "Local" if data.get("own_score", False) else "External"
-            log_entry = (
-                f"| UID: {uid:<4} | Hotkey: {hotkey_str:<45} | GPU: {gpu_str:<36} | "
-                f"Score: {score_str:7} | Allocated: {allocated:<5} | "
-                f"RelScore: {reliability_score:<5} | Source: {source:<9} |"
-            )
-            bt.logging.info(log_entry)
-        bt.logging.info("-" * 190)
-        bt.logging.info(f"🔢 Synced scores : {self.scores.tolist()}")
+            log_entry = f"UID {uid}: {hotkey_str[:16]}... | {gpu_str} | score={score_str} | alloc={allocated}"
+            bt.logging.debug(log_entry)
+        bt.logging.debug(f"Scores: {self.scores.tolist()}")
 
     def sync_local(self):
         """
@@ -553,6 +726,16 @@ class Validator:
         """
         self.metagraph.sync(subtensor=self.subtensor)
         self.uids = self.metagraph.uids.tolist()
+
+    def _safe_get_metric(self, metric_array, default: float = 0.0) -> float:
+        """Safely access metagraph metric for this validator's UID with bounds checking."""
+        try:
+            uid = self.validator_subnet_uid
+            if uid is not None and 0 <= uid < len(metric_array):
+                return float(metric_array[uid])
+        except Exception:
+            pass
+        return default
 
     def sync_status(self):
         # Check if the validator is still registered
@@ -573,10 +756,66 @@ class Validator:
         if subnet_prometheus_version != current_version:
             self.init_prometheus()
 
+    async def sync_allocation_status_to_api(self):
+        """
+        Sync full allocation status to the validation API.
+
+        Always sends complete state of all miners (allocated vs free).
+        This is simple, self-healing, and the overhead for 250-1000 keys
+        every few seconds is negligible (~60KB).
+        """
+        try:
+            # 1. Get current allocations from database
+            cursor = self.db.get_cursor()
+            try:
+                cursor.execute("SELECT hotkey FROM allocation")
+                rows = cursor.fetchall()
+                current_allocations = {row[0] for row in rows}
+            finally:
+                cursor.close()
+
+            # 2. Get all queryable miner hotkeys (with bounds checking)
+            queryable_uids = self.get_queryable()
+            hotkeys_len = len(self.metagraph.hotkeys)
+            all_hotkeys = {
+                self.metagraph.hotkeys[uid]
+                for uid in queryable_uids
+                if 0 <= uid < hotkeys_len
+            }
+
+            # 3. Build full state payload
+            allocations = []
+            for hk in all_hotkeys:
+                state = "allocated" if hk in current_allocations else "free"
+                allocations.append({"key": hk, "state": state})
+
+            if not allocations:
+                return  # No miners to sync
+
+            # 4. Send to API
+            result = self.api_client.sync_allocations(allocations)
+
+            if result:
+                allocated_count = sum(1 for a in allocations if a["state"] == "allocated")
+                bt.logging.info(
+                    f"Allocation sync: {allocated_count}/{len(allocations)} allocated"
+                )
+                self._allocation_sync_fail_count = 0
+            else:
+                self._allocation_sync_fail_count += 1
+                bt.logging.warning(
+                    f"Allocation sync failed (attempt {self._allocation_sync_fail_count})"
+                )
+
+        except Exception as e:
+            self._allocation_sync_fail_count += 1
+            bt.logging.error(f"Error in allocation sync: {e}")
+
     def sync_miners_info(self, queryable_tuple_uids_axons: List[Tuple[int, bt.AxonInfo]]):
         if queryable_tuple_uids_axons:
+            current_miners = self.miners_items_to_set or set()
             for uid, axon in queryable_tuple_uids_axons:
-                if self.miners_items_to_set and (uid, axon.hotkey) not in self.miners_items_to_set:
+                if (uid, axon.hotkey) not in current_miners:
                     try:
                         bt.logging.info(f"❌ Miner {uid}-{self.miners[uid]} has been deregistered. Clean up old entries.")
                         purge_miner_entries(self.db, uid, self.miners[uid])
@@ -586,13 +825,13 @@ class Validator:
                     update_miners(self.db, [(uid, axon.hotkey)]),
                     self.miners[uid] = axon.hotkey
         else:
-            bt.logging.warning(f"❌ No queryable miners.")
+            bt.logging.warning(f"❌ No queryable miners (total registered: {len(self.uids)})")
 
     @staticmethod
     def filter_axons(queryable_tuple_uids_axons: list[tuple[int, bt.AxonInfo]]) -> dict[int, bt.AxonInfo]:
         """Filter the axons with uids_list, remove those with the same IP address."""
         # FIXME(CSN-904): this does not work as intended, disabling till we know what to do
-        bt.logging.debug("Axon filtering disabled")
+        bt.logging.trace("Axon filtering disabled")
         return dict(queryable_tuple_uids_axons)
 
         # Set to keep track of unique identifiers
@@ -614,16 +853,24 @@ class Validator:
     def filter_axon_version(self, dict_filtered_axons: dict):
         # Get the minimal miner version
         latest_version = version2number(get_remote_version(pattern="__minimal_miner_version__"))
-        if percent(len(dict_filtered_axons), self.total_current_miners) <= self.validator_whitelist_updated_threshold:
-            bt.logging.info(f"Less than {self.validator_whitelist_updated_threshold}% miners are currently using the last version. Allowing all.")
+        dict_filtered_axons_version = {}
+        total_current_miners = self.total_current_miners or len(dict_filtered_axons)
+        if total_current_miners == 0:
             return dict_filtered_axons
 
-        dict_filtered_axons_version = {}
+        updated_count = 0
         for uid, axon in dict_filtered_axons.items():
             if latest_version and latest_version <= axon.version:
                 dict_filtered_axons_version[uid] = axon
+                updated_count += 1
             else:
-                bt.logging.debug(f"Skipping outdated version UID: {uid}")
+                bt.logging.trace(f"Skipping outdated UID {uid}: version {axon.version} < required {latest_version}")
+
+        if percent(updated_count, total_current_miners) <= self.validator_whitelist_updated_threshold:
+            bt.logging.info(
+                f"Less than {self.validator_whitelist_updated_threshold}% miners are currently using the last version. Allowing all."
+            )
+            return dict_filtered_axons
         return dict_filtered_axons_version
 
     def is_blacklisted(self, neuron: bt.NeuronInfoLite):
@@ -632,44 +879,32 @@ class Validator:
 
         # Blacklist coldkeys that are blacklisted by user
         if coldkey in self.blacklist_coldkeys:
-            bt.logging.debug(f"Blacklisted recognized coldkey {coldkey} - with hotkey: {hotkey}")
+            bt.logging.info(f"Blacklisted recognized coldkey {coldkey} - with hotkey: {hotkey}")
             return True
 
         # Blacklist coldkeys that are blacklisted by user or by set of hotkeys
         if hotkey in self.blacklist_hotkeys:
-            bt.logging.debug(f"Blacklisted recognized hotkey {hotkey}")
+            bt.logging.info(f"Blacklisted recognized hotkey {hotkey}")
             # Add the coldkey attached to this hotkey in the blacklisted coldkeys
             self.blacklist_hotkeys.add(coldkey)
             return True
 
         # Blacklist coldkeys that are exploiters
         if coldkey in self.exploiters_coldkeys:
-            bt.logging.debug(f"Blacklisted exploiter coldkey {coldkey} - with hotkey: {hotkey}")
+            bt.logging.info(f"Blacklisted exploiter coldkey {coldkey} - with hotkey: {hotkey}")
             return True
 
         # Blacklist hotkeys that are exploiters
         if hotkey in self.exploiters_hotkeys:
-            bt.logging.debug(f"Blacklisted exploiter hotkey {hotkey}")
+            bt.logging.info(f"Blacklisted exploiter hotkey {hotkey}")
             # Add the coldkey attached to this hotkey in the blacklisted coldkeys
             self.exploiters_hotkeys.add(coldkey)
             return True
         return False
 
-    def get_valid_tensors(self, metagraph):
-        tensors = []
-        self.total_current_miners = 0
-        for uid in metagraph.uids:
-            neuron = metagraph.neurons[uid]
-
-            if neuron.axon_info.ip != "0.0.0.0" and not self.is_blacklisted(neuron=neuron):
-                self.total_current_miners += 1
-                tensors.append(True)
-            else:
-                tensors.append(False)
-        return tensors
-
     def get_valid_queryable(self):
         valid_queryable = []
+        self.total_current_miners = 0
         bt.logging.trace(f"All UIDs before filtering: {self.uids}")
         for uid in self.uids:
             neuron: bt.NeuronInfoLite = self.metagraph.neurons[uid]
@@ -677,6 +912,7 @@ class Validator:
 
             if neuron.axon_info.ip != "0.0.0.0" and not self.is_blacklisted(neuron=neuron):
                 valid_queryable.append((uid, axon))
+                self.total_current_miners += 1
             elif self.is_blacklisted(neuron=neuron):
                 bt.logging.trace(f"Skipping blacklisted UID: {uid}")
             else:
@@ -712,55 +948,12 @@ class Validator:
     async def get_specs_wandb(self):
         """
         Retrieves hardware specifications from Wandb, updates the miner_details table,
-        and checks for differences in GPU specs, logging changes only for allocated hotkeys.
         Entries not present in Wandb will increment no_specs_count and be removed after 2 fails.
         """
         bt.logging.info(f"💻 Hardware list of uids queried (Wandb): {list(self._queryable_uids.keys())}")
 
         # Retrieve specs from Wandb
         specs_dict = self.wandb.get_miner_specs(self._queryable_uids)
-
-        # Fetch current specs from miner_details using the existing function
-        current_miner_details = get_miner_details(self.db)
-
-        # Compare and detect GPU spec changes for allocated hotkeys
-        for hotkey, new_specs in specs_dict.values():
-            if hotkey in self.allocated_hotkeys:
-                current_specs = current_miner_details.get(hotkey, {})
-                current_gpu_specs = current_specs.get("gpu", {})
-                new_gpu_specs = new_specs.get("gpu", {})
-
-                # Extract the count values
-                current_count = current_gpu_specs.get("count", 0)
-                new_count = new_gpu_specs.get("count", 0)
-
-                # Initialize names to None by default
-                current_name = None
-                new_name = None
-
-                # Retrieve the current name if details are present and non-empty
-                current_details = current_gpu_specs.get("details", [])
-                if isinstance(current_details, list) and len(current_details) > 0:
-                    current_name = current_details[0].get("name")
-
-                # Retrieve the new name if details are present and non-empty
-                new_details = new_gpu_specs.get("details", [])
-                if isinstance(new_details, list) and len(new_details) > 0:
-                    new_name = new_details[0].get("name")
-
-                # Compare only count and name
-                if current_count != new_count or current_name != new_name:
-                    axon = None
-                    for uid, axon_info in self._queryable_uids.items():
-                        if axon_info.hotkey == hotkey:
-                            axon = axon_info
-                            break
-
-                    if axon:
-                        bt.logging.info(f"GPU specs changed for allocated hotkey {hotkey}:")
-                        bt.logging.info(f"Old count: {current_count}, Old name: {current_name}")
-                        bt.logging.info(f"New count: {new_count}, New name: {new_name}")
-                        await self.deallocate_miner(axon, None)
 
         # Collect the hotkeys present in Wandb this pass
         present_hotkeys = {hk for (hk, _specs) in specs_dict.values()}
@@ -770,546 +963,386 @@ class Validator:
 
         self.finalized_specs_once = True
 
+    @staticmethod
+    def _parse_api_timestamp(ts_val: Any) -> float:
+        if not ts_val:
+            return 0.0
+        try:
+            ts_str = str(ts_val).replace("Z", "+00:00")
+            return datetime.fromisoformat(ts_str).timestamp()
+        except Exception:
+            return 0.0
+
+    def _build_api_map(self, instances: List[ApiInstance]) -> dict[str, list[ApiInstance]]:
+        api_map: dict[str, list[ApiInstance]] = {}
+        for inst in instances:
+            api_map.setdefault(inst.pk_M, []).append(inst)
+        for pk, lst in api_map.items():
+            lst.sort(key=lambda x: self._parse_api_timestamp(x.stats.get("updated_at")), reverse=True)
+        return api_map
+
+    @staticmethod
+    def _is_allocated_state(state: Optional[str]) -> bool:
+        return isinstance(state, str) and state.lower() == "allocated"
+
+    @staticmethod
+    def _score_from_api_status(status: str) -> float:
+        st = (status or "").lower()
+        if st in ("pass", "pending"):
+            return 1.0
+        return 0.0
+
+    async def _fetch_remote_gpu(self, miner_info: dict) -> tuple[bool, Optional[str], Optional[str], int]:
+        """
+        Fetch primary GPU UUID and name over SSH. Returns (ok, uuid, name, num_gpus).
+        """
+        ssh_timeout = self._ssh_timeout_sec  # capture for closure
+        ssh_private_key = self.ssh_private_key  # capture for closure (key-based auth)
+
+        def _run():
+            try:
+                ssh = paramiko.SSHClient()
+                ssh.set_missing_host_key_policy(EphemeralContainerHostKeyPolicy())
+                ssh.connect(
+                    hostname=miner_info["host"],
+                    port=int(miner_info.get("port", 22)),
+                    username=miner_info["username"],
+                    pkey=ssh_private_key,  # Use key-based auth
+                    timeout=ssh_timeout,
+                )
+                cmd = "nvidia-smi --query-gpu=uuid,name --format=csv,noheader,nounits"
+                stdin, stdout, stderr = ssh.exec_command(cmd, timeout=ssh_timeout)
+                out = stdout.read().decode().strip()
+                err = stderr.read().decode().strip()
+                ssh.close()
+                if err:
+                    bt.logging.debug(f"nvidia-smi error on miner {miner_info.get('host')}: {err}")
+                lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+                if not lines:
+                    return False, None, None, 0
+                first = lines[0].split(",")
+                uuid_val = first[0].strip() if len(first) >= 1 else None
+                name_val = first[1].strip() if len(first) >= 2 else None
+                return True, uuid_val or None, name_val or None, len(lines)
+            except Exception as e:
+                bt.logging.debug(f"SSH GPU probe failed: {e}")
+                return False, None, None, 0
+
+        return await asyncio.to_thread(_run)
+
+    async def _validate_with_uid(self, uid: int, axon: bt.AxonInfo, api_map: dict, dendrite):
+        """Wrapper to include uid in result for parallel processing."""
+        res = await self._validate_single(axon, api_map, dendrite)
+        return uid, axon.hotkey, res
+
+    async def _validate_single(
+        self,
+        axon: bt.AxonInfo,
+        api_map: dict[str, list[ApiInstance]],
+        dendrite,
+    ):
+        hotkey = axon.hotkey
+        gpu_uuid = None
+        gpu_name = None
+        gpu_count = 0
+        api_status = "unknown"
+        allocation_ok = False
+        public_key = None
+        base_score = 0.0
+
+        best_inst = None
+        inst_list = api_map.get(hotkey, [])
+        if inst_list:
+            best_inst = inst_list[0]
+            api_status = (best_inst.current_status or "unknown").lower()
+
+        # Early return for failed miners - no point doing allocation check
+        if api_status not in ("pass", "pending"):
+            bt.logging.debug(f"[{hotkey[:8]}] api_status={api_status}, skipping allocation check")
+            return {
+                "passed": False,
+                "gpu_name": best_inst.primary_gpu_name if best_inst else None,
+                "gpu_count": best_inst.gpu_count if best_inst else 0,
+                "base_score": 0.0,
+            }
+
+        api_gpu_name = None
+        api_gpu_count = 0
+        if best_inst is not None:
+            api_gpu_name = best_inst.primary_gpu_name
+            api_gpu_count = best_inst.gpu_count
+
+        alloc_state = None
+        if best_inst is not None:
+            try:
+                raw_alloc = best_inst.stats.get("alloc_state")
+                alloc_state = str(raw_alloc).lower() if raw_alloc is not None else None
+            except Exception:
+                alloc_state = None
+
+        # Test containers use separate SSH port (4445) and per-validator naming
+        # All validators can verify GPU UUID via test allocations, regardless of production allocation
+
+        miner_info = None
+        try:
+            # Skip RSA key generation - send empty public_key, miner returns plain JSON
+            # This is backwards compatible: old miners will fail gracefully, new miners return plain
+            public_key = ""
+            miner_info = await self.allocate_miner(axon, "", "", self.ssh_public_key, dendrite)
+            allocation_ok = miner_info is not None
+        except Exception as e:
+            bt.logging.debug(f"[{hotkey[:8]}] allocation failed - {e}")
+            allocation_ok = False
+        bt.logging.debug(f"[{hotkey[:8]}] allocation={'OK' if allocation_ok else 'FAIL'}")
+
+        # Use try/finally to guarantee deallocation whenever allocation succeeds
+        try:
+            if miner_info:
+                try:
+                    ok, uuid_val, name_val, count_val = await self._fetch_remote_gpu(miner_info)
+                    bt.logging.debug(f"[{hotkey[:8]}] SSH probe: ok={ok}, uuid={uuid_val}, gpu={name_val}, count={count_val}")
+                    if ok:
+                        gpu_uuid = uuid_val
+                except Exception as e:
+                    bt.logging.debug(f"[{hotkey[:8]}] SSH probe failed - {e}")
+
+            api_uuid = best_inst.primary_gpu_uuid if best_inst else None
+            uuid_match = (
+                gpu_uuid is not None
+                and best_inst is not None
+                and api_uuid is not None
+                and gpu_uuid == api_uuid
+            )
+            # Detailed UUID comparison logging
+            if not uuid_match and (gpu_uuid or api_uuid):
+                bt.logging.debug(
+                    f"[{hotkey[:8]}] UUID mismatch: ssh={gpu_uuid} vs api={api_uuid}"
+                )
+            bt.logging.debug(f"[{hotkey[:8]}] uuid_match={uuid_match}, api_status={api_status}")
+
+            base_pass = allocation_ok and api_status == "pass" and uuid_match
+            health_ok = None
+            if base_pass and miner_info:
+                try:
+                    health_ok = perform_health_check(axon, miner_info, self.ssh_private_key)
+                    bt.logging.debug(f"[{hotkey[:8]}] health_check={health_ok}")
+                except Exception as e:
+                    bt.logging.debug(f"[{hotkey[:8]}] health_check error: {e}")
+                    health_ok = False
+
+            passed = base_pass and (health_ok is not False)
+
+            if api_status == "pass":
+                base_score = 1.0 if passed else 0.0
+            elif api_status == "pending":
+                base_score = 1.0 if (allocation_ok and uuid_match) else 0.0
+            else:
+                base_score = 0.0
+            bt.logging.debug(f"[{hotkey[:8]}] passed={passed}, base_score={base_score}")
+        finally:
+            # Always deallocate if allocation succeeded, regardless of SSH/validation outcome
+            if allocation_ok:
+                try:
+                    await self.deallocate_miner(axon, public_key, dendrite)
+                    bt.logging.debug(f"[{hotkey[:8]}] deallocation completed")
+                except Exception as e:
+                    bt.logging.debug(f"[{hotkey[:8]}] deallocation failed - {e}")
+
+        if gpu_count == 0 and best_inst is not None:
+            gpu_count = api_gpu_count
+        if gpu_name is None and best_inst is not None:
+            gpu_name = api_gpu_name
+
+        return {
+            "hotkey": hotkey,
+            "allocation_ok": allocation_ok,
+            "api_status": api_status,
+            "alloc_state": alloc_state,
+            "uuid_match": uuid_match,
+            "gpu_uuid": gpu_uuid,
+            "gpu_name": gpu_name,
+            "gpu_count": gpu_count,
+            "passed": passed,
+            "health_ok": health_ok,
+            "base_score": float(base_score),
+        }
+
     async def proof_of_gpu(self):
         """
-        Perform Proof-of-GPU benchmarking on allocated miners without overlapping tests.
-        Uses asyncio with ThreadPoolExecutor to test miners in parallel.
+        PoG3 validation flow:
+        1) Allocate a short-lived test container and read GPU UUID over SSH.
+           Test containers use separate SSH port (4445) and per-validator naming,
+           so all validators can verify GPU UUID regardless of production allocation state.
+        2) Compare SSH UUID to API UUID; score pass/pending only when UUID matches (health check gates pass).
+        GPU specs persisted to DB are API-authoritative; SSH is only used for UUID verification.
         """
+        bt.logging.debug("PoG3 task execution started")
         try:
-            # Init miners to be tested
+            # Refresh queryable miners
             self._queryable_uids = self.get_queryable()
-            valid_validator_hotkeys = self.get_valid_validator_hotkeys()
-            self.allocated_hotkeys = self.wandb.get_allocated_hotkeys(valid_validator_hotkeys, True)
 
-            # Settings
-            merkle_proof = self.config_data["merkle_proof"]
-            retry_limit = merkle_proof.get("pog_retry_limit",30)
-            retry_interval = merkle_proof.get("pog_retry_interval",75)
-            num_workers = merkle_proof.get("max_workers",32)
-            max_delay = merkle_proof.get("max_random_delay",1200)
+            api_instances, inst_source = self.api_client.fetch_instances_full_with_meta(
+                statuses=["pass", "pending", "fail", "stale", "offline", "waiting"]
+            )
 
-            # Random delay for PoG
-            instant = getattr(self, "instant_validation", False)
-            delay = 0 if instant else random.uniform(0, max_delay)
-            if delay > 0:
-                bt.logging.info(f"💻⏳ Scheduled Proof-of-GPU task to start in {delay:.2f} seconds.")
-                await asyncio.sleep(delay)
-            else:
-                bt.logging.info("💻⚡ Instant mode: starting Proof-of-GPU immediately.")
+            if inst_source == "none" or api_instances is None:
+                bt.logging.warning(
+                    "PoG3 skipped: validation API unavailable or returned invalid data."
+                )
+                return
 
-            bt.logging.info(f"💻 Starting Proof-of-GPU benchmarking for uids: {list(self._queryable_uids.keys())}")
-            # Shared dictionary to store results
+            if inst_source == "cache":
+                bt.logging.warning(
+                    "PoG3 skipped: validation API returned stale cached data. "
+                    "Scoring requires live API data to ensure accuracy."
+                )
+                return
+
+            api_map = self._build_api_map(api_instances)
+
             self.results = {}
-            # Dictionary to track retry counts
-            retry_counts = defaultdict(int)
-            # Queue of miners to process
-            queue = asyncio.Queue()
+            self.stats = {}
+            bt.logging.info(f"💻 Starting PoG3 validation for {len(self._queryable_uids)} miners")
 
-            # Initialize the queue with initial miners
-            for i in range(0, len(self.uids), self.validator_challenge_batch_size):
-                for _uid in self.uids[i : i + self.validator_challenge_batch_size]:
-                    try:
-                        axon = self._queryable_uids[_uid]
-                        if axon.hotkey in self.allocated_hotkeys:
-                            bt.logging.info(f"Skipping allocated miner: {axon.hotkey}")
-                            continue  # skip this miner since it's allocated
-                        await queue.put(axon)
-                    except KeyError:
-                        continue
+            # Run PoG3 checks in parallel batches with a single shared dendrite
+            batch_size = self.config.get("pog", {}).get("batch_size", 64)
+            items = list(self._queryable_uids.items())
+            total_batches = (len(items) + batch_size - 1) // batch_size
 
-            # Initialize a single Lock for thread-safe updates to results
-            results_lock = asyncio.Lock()
+            # Create single dendrite instance for all batch validations
+            async with bt.dendrite(wallet=self.wallet) as dendrite:
+                for i in range(0, len(items), batch_size):
+                    batch = items[i:i + batch_size]
+                    batch_num = i // batch_size + 1
+                    bt.logging.debug(f"Validating batch {batch_num}/{total_batches}: {len(batch)} miners")
 
-            async def worker():
-                while True:
-                    try:
-                        axon = await queue.get()
-                    except asyncio.CancelledError:
-                        break
-                    hotkey = axon.hotkey
-                    try:
-                        # Set a timeout for the GPU test
-                        timeout = 300  # e.g., 5 minutes
-                        # Define a synchronous helper function to run the asynchronous test_miner_gpu
-                        # This is required because run_in_executor expects a synchronous callable.
-                        def run_test_miner_gpu():
-                            # Run the async test_miner_gpu function and wait for its result.
-                            future = asyncio.run_coroutine_threadsafe(self.test_miner_gpu(axon, self.config_data), self.loop)
-                            return future.result()
+                    batch_start = time.time()
+                    tasks = [self._validate_with_uid(uid, axon, api_map, dendrite) for uid, axon in batch]
+                    batch_results = await asyncio.gather(*tasks, return_exceptions=True)
+                    batch_elapsed = time.time() - batch_start
 
-                        # Submit the run_test_miner_gpu function to a thread pool executor.
-                        # The asyncio.wait_for is used to enforce a timeout for the overall operation.
-                        result = await asyncio.wait_for(
-                            asyncio.get_running_loop().run_in_executor(
-                                self.executor, run_test_miner_gpu
-                            ),
-                            timeout=timeout
+                    batch_ok = 0
+                    batch_fail = 0
+                    for result in batch_results:
+                        if isinstance(result, Exception):
+                            bt.logging.debug(f"Validation exception: {result}")
+                            batch_fail += 1
+                            continue
+                        uid, hotkey, res = result
+                        self.results[hotkey] = res
+                        if res and res.get("base_score", 0) > 0:
+                            batch_ok += 1
+                        else:
+                            batch_fail += 1
+
+                    bt.logging.debug(f"Batch {batch_num} done in {batch_elapsed:.1f}s: {batch_ok} passed, {batch_fail} failed")
+
+            # Persist per-miner GPU specs + GPU-scaled PoG3 scores.
+            for uid in self.uids:
+                hotkey = self.metagraph.axons[uid].hotkey
+                res = self.results.get(hotkey)
+                gpu_specs = None
+                base_score = 0.0
+                allocated_flag = False
+
+                if res:
+                    # Allocation state from API (authoritative rental state)
+                    alloc_state = res.get("alloc_state")
+                    allocated_flag = self._is_allocated_state(alloc_state)
+
+                    base_score = float(res.get("base_score") or 0.0)
+
+                    # GPU specs are API-authoritative; SSH is only used for UUID matching.
+                    if res.get("gpu_name"):
+                        gpu_specs = {
+                            "gpu_name": res.get("gpu_name"),
+                            "num_gpus": res.get("gpu_count", 0),
+                        }
+                        update_pog_stats(
+                            self.db,
+                            hotkey,
+                            gpu_specs.get("gpu_name"),
+                            gpu_specs.get("num_gpus"),
                         )
-                        if result[1] is not None and result[2] > 0:
-                            async with results_lock:
-                                self.results[hotkey] = {
-                                    "gpu_name": result[1],
-                                    "num_gpus": result[2]
-                                }
-                            update_pog_stats(self.db, hotkey, result[1], result[2])
-                        elif result[1] is None and result[2] == -1:
-                            # Health check failed - don't retry
-                            bt.logging.info(f"❌ {hotkey}: Health check failed, skipping retry")
-                            update_pog_stats(self.db, hotkey, None, None)
-                        else:
-                            raise RuntimeError("GPU test failed")
-                    except asyncio.TimeoutError:
-                        bt.logging.warning(f"⏳ Timeout while testing {hotkey}. Retrying...")
-                        retry_counts[hotkey] += 1
-                        if retry_counts[hotkey] < retry_limit:
-                            bt.logging.info(f"🔄 {hotkey}: Retrying miner -> (Attempt {retry_counts[hotkey]})")
-                            await asyncio.sleep(retry_interval)
-                            await queue.put(axon)
-                        else:
-                            bt.logging.info(f"❌ {hotkey}: Miner failed after {retry_limit} attempts (Timeout).")
-                            update_pog_stats(self.db, hotkey, None, None)
-                    except Exception as e:
-                        bt.logging.debug(f"Exception in worker for {hotkey}: {e}")
-                        retry_counts[hotkey] += 1
-                        if retry_counts[hotkey] < retry_limit:
-                            bt.logging.info(f"🔄 {hotkey}: Retrying miner -> (Attempt {retry_counts[hotkey]})")
-                            await asyncio.sleep(retry_interval)
-                            await queue.put(axon)
-                        else:
-                            bt.logging.info(f"❌ {hotkey}: Miner failed after {retry_limit} attempts.")
-                            update_pog_stats(self.db, hotkey, None, None)
-                    finally:
-                        queue.task_done()
+                    else:
+                        # No API GPU data from PoG3 attempt - purge any stale pog_stats entry
+                        purge_pog_stats(self.db, hotkey)
+                else:
+                    # No PoG3 result for this hotkey in this run → purge any stale pog_stats entry
+                    purge_pog_stats(self.db, hotkey)
 
-            # Number of concurrent workers
-            # Determine a safe default number of workers
-            cpu_cores = os.cpu_count() or 1
-            safe_max_workers = min((cpu_cores + 4)*4, num_workers)
+                # Store GPU-scaled PoG3 score; reliability will be applied in sync_scores().
+                # This makes more GPUs receive proportionally higher weights within a GPU group.
+                gpu_multiplier = 0
+                if isinstance(gpu_specs, dict):
+                    try:
+                        gpu_multiplier = int(gpu_specs.get("num_gpus") or 0)
+                    except Exception:
+                        gpu_multiplier = 0
+                if gpu_multiplier < 0:
+                    gpu_multiplier = 0
 
-            workers = [asyncio.create_task(worker()) for _ in range(safe_max_workers)]
-            bt.logging.debug(f"Started {safe_max_workers} worker tasks for Proof-of-GPU benchmarking.")
+                # If miner passes validation (base_score > 0) but has missing GPU count,
+                # use 1 as minimum to avoid zeroing out valid miners due to missing API data
+                if base_score > 0 and gpu_multiplier == 0:
+                    bt.logging.warning(f"UID {uid} passed validation but has missing GPU count, using 1 as fallback")
+                    gpu_multiplier = 1
 
-            # Wait until the queue is fully processed
-            await queue.join()
+                final_score = float(base_score) * float(gpu_multiplier)
 
-            # Cancel worker tasks
-            for w in workers:
-                w.cancel()
-            # Wait until all worker tasks are cancelled
-            await asyncio.gather(*workers, return_exceptions=True)
+                self.stats[uid] = {
+                    "hotkey": hotkey,
+                    "allocated": allocated_flag,
+                    "own_score": True,
+                    "score": final_score * 100.0,
+                    "gpu_specs": gpu_specs,
+                    "reliability_score": 1.0,
+                }
+                self.scores[uid] = final_score
 
-            bt.logging.success(f"✅ Proof-of-GPU benchmarking completed.")
-            return self.results
+            write_stats(self.db, self.stats)
+
+            # Build summary of successful validations
+            passed_count = 0
+            failed_count = 0
+            summary_lines = []
+            for uid in self.uids:
+                hotkey = self.metagraph.axons[uid].hotkey
+                res = self.results.get(hotkey)
+                if res and res.get("base_score", 0) > 0:
+                    passed_count += 1
+                    gpu_name = res.get("gpu_name") or "unknown"
+                    gpu_count = res.get("gpu_count") or 0
+                    summary_lines.append(f"  UID {uid}: {gpu_count}x {gpu_name}")
+                elif res:
+                    failed_count += 1
+
+            bt.logging.success(f"PoG3 completed: {passed_count} passed, {failed_count} failed")
+            # Per-miner details at DEBUG level only
+            for line in summary_lines:
+                bt.logging.debug(line)
+
+        except asyncio.CancelledError:
+            bt.logging.info("PoG3 task cancelled (likely due to shutdown)")
         except Exception as e:
-            bt.logging.info(f"❌ Exception in proof_of_gpu: {e}\n{traceback.format_exc()}")
+            bt.logging.error(f"Exception in proof_of_gpu: {e}\n{traceback.format_exc()}")
 
     def on_gpu_task_done(self, task):
         try:
-            results = task.result()
-            bt.logging.debug(f"Proof-of-GPU Results: {results}")
-            self.gpu_task = None  # Reset the task reference
-            self.sync_scores()
-
+            _ = task.result()
+            bt.logging.debug("Proof-of-GPU task completed.")
         except Exception as e:
             bt.logging.error(f"Proof-of-GPU task failed: {e}")
+        finally:
             self.gpu_task = None
 
     async def _publish_pog_result_event(
-        self, hotkey, request_id, start_time, result,
-        benchmark_data: dict | None = None,
-        health_check_result: bool | None = None,
-        error_details: str | None = None,
+        self, *args, **kwargs,
     ):
-        # Publish successful POG result
-        validation_duration = time.time() - start_time
-        await self.pubsub_client.publish_pog_result_event(
-            miner_hotkey=hotkey,
-            request_id=request_id,
-            result=result,
-            validation_duration=validation_duration,
-            benchmark_data=benchmark_data,
-            health_check_result=health_check_result,
-            error_details=error_details
-        )
+        return None
 
     async def test_miner_gpu(self, axon, config_data):
-        """
-        Allocate, test, and deallocate a single miner (Sybil-compatible).
-        :return: Tuple of (miner_hotkey, gpu_name, num_gpus)
-        """
-        allocation_status = False
-        miner_info = None
-        host = None
-        hotkey = axon.hotkey
-        request_id = str(uuid.uuid4())
-        start_time = time.time()
-        public_key = None
-        bt.logging.info(f"{hotkey}: Starting miner test.")
-
-        try:
-            gpu_data = config_data["gpu_performance"]
-            gpu_tolerance_pairs = gpu_data.get("gpu_tolerance_pairs", {})
-            merkle_proof = config_data["merkle_proof"]
-            time_tol = merkle_proof.get("time_tolerance", 5)
-            # Extract miner_script path
-            miner_script_path = merkle_proof["miner_script_path"]
-
-            # Step 1: Allocate Miner
-            private_key, public_key = rsa.generate_key_pair()
-            allocation_response = await self.allocate_miner(axon, private_key, public_key, self.ssh_public_key)
-            if not allocation_response:
-                bt.logging.trace(f"🌀 {hotkey}: Busy or not allocatable.")
-                return (hotkey, None, 0)
-            allocation_status = True
-            miner_info = allocation_response
-            host = miner_info['host']
-            bt.logging.trace(f"{hotkey}: Allocated Miner for testing.")
-
-            # Step 2: Connect via SSH
-            ssh_client = paramiko.SSHClient()
-            ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            bt.logging.debug(f"{hotkey}: Connect to Miner via SSH.")
-            ssh_client.connect(
-                host,
-                port=miner_info.get('port', 4444),
-                username=miner_info.get('username', 'root'),
-                pkey=self.ssh_private_key,
-                timeout=10,
-            )
-            if not (ssh_client):
-                # FIXME: I'm suspicious about this check, I don't think it actually works
-                ssh_client.close()
-                bt.logging.trace(f"{hotkey}: SSH connection failed.")
-                return (hotkey, None, -1)
-            bt.logging.trace(f"{hotkey}: Connected to Miner via SSH.")
-
-            # Step 3: Hash Check
-            local_hash = compute_script_hash(miner_script_path)
-            bt.logging.trace(f"{hotkey}: [Step 1] Local script hash computed successfully.")
-            bt.logging.trace(f"{hotkey}: Local Hash: {local_hash}")
-            remote_hash = send_script_and_request_hash(ssh_client, miner_script_path)
-            bt.logging.trace(f"{hotkey}: [Step 1] Remote script hash received.")
-            bt.logging.trace(f"{hotkey}: Remote Hash: {remote_hash}")
-            if local_hash != remote_hash:
-                bt.logging.trace(f"{hotkey}: [Integrity Check] FAILURE: Hash mismatch detected.")
-                raise ValueError(f"{hotkey}: Script integrity verification failed.")
-
-            # Step 4: Get GPU info NVIDIA from the remote miner
-            bt.logging.trace(f"{hotkey}: [Step 4] Retrieving GPU information (NVIDIA driver) from miner...")
-            gpu_info = get_remote_gpu_info(ssh_client)
-            num_gpus_reported = gpu_info["num_gpus"]
-            gpu_name_reported = gpu_info["gpu_names"][0] if num_gpus_reported > 0 else None
-            bt.logging.debug(f"{hotkey}: [Step 4] Reported GPU Information:")
-            if num_gpus_reported > 0:
-                bt.logging.debug(f"{hotkey}: Number of GPUs: {num_gpus_reported}")
-                bt.logging.debug(f"{hotkey}: GPU Type: {gpu_name_reported}")
-            if num_gpus_reported <= 0:
-                bt.logging.debug(f"{hotkey}: No GPUs detected.")
-                raise ValueError("No GPUs detected.")
-
-            # Step 5: Run the benchmarking mode
-            bt.logging.debug(f"💻 {hotkey}: Executing benchmarking mode.")
-            bt.logging.trace(f"{hotkey}: [Step 5] Executing benchmarking mode on the miner...")
-            execution_output = execute_script_on_miner(ssh_client, mode='benchmark')
-            bt.logging.trace(f"{hotkey}: [Step 5] Benchmarking completed.")
-            # Parse the execution output (Sybil compatible)
-            num_gpus, vram, size_fp16, time_fp16, size_fp32, time_fp32 = parse_benchmark_output(execution_output)
-            bt.logging.trace(f"{hotkey}: [Benchmark Results] Detected {num_gpus} GPU(s) with {vram} GB unfractured VRAM.")
-            bt.logging.trace(f"{hotkey}: FP16 - Matrix Size: {size_fp16}, Execution Time: {time_fp16} s")
-            bt.logging.trace(f"{hotkey}: FP32 - Matrix Size: {size_fp32}, Execution Time: {time_fp32} s")
-            # Calculate performance metrics
-            fp16_tflops = (2 * size_fp16 ** 3) / time_fp16 / 1e12
-            fp32_tflops = (2 * size_fp32 ** 3) / time_fp32 / 1e12
-            bt.logging.trace(f"{hotkey}: [Performance Metrics] Calculated TFLOPS:")
-            bt.logging.trace(f"{hotkey}: FP16: {fp16_tflops:.2f} TFLOPS")
-            bt.logging.trace(f"{hotkey}: FP32: {fp32_tflops:.2f} TFLOPS")
-            gpu_name = identify_gpu(fp16_tflops, fp32_tflops, vram, gpu_data, gpu_name_reported, gpu_tolerance_pairs)
-            bt.logging.trace(f"{hotkey}: [GPU Identification] Based on performance: {gpu_name}")
-            # Step 5.1: Ensure reported GPU matches benchmark-identified GPU
-            if gpu_name != gpu_name_reported:
-                bt.logging.debug(f"{hotkey}: GPU mismatch! Reported: {gpu_name_reported}, Benchmarked: {gpu_name}")
-                raise ValueError("Reported GPU and benchmark GPU do not match.")
-
-            # Step 6: Run the Merkle proof mode
-            bt.logging.debug(f"{hotkey}: [Step 6] Initiating Merkle Proof Mode.")
-            # Step 1: Send seeds and execute compute mode
-            n = adjust_matrix_size(vram, element_size=4, buffer_factor=0.05)
-            seeds = get_random_seeds(num_gpus)
-            send_seeds(ssh_client, seeds, n)
-            bt.logging.trace(f"{hotkey}: [Step 6] Compute mode executed on miner - Matrix Size: {n}")
-            start_time = time.time()
-            execution_output = execute_script_on_miner(ssh_client, mode='compute')
-            end_time = time.time()
-            elapsed_time = end_time - start_time
-            bt.logging.trace(f"{hotkey}: Compute mode execution time: {elapsed_time:.2f} seconds.")
-            # Parse the execution output (Sybil compatible)
-            root_hashes_list, gpu_timings_list = parse_merkle_output(execution_output)
-            bt.logging.trace(f"{hotkey}: [Merkle Proof] Root hashes received from GPUs:")
-            for gpu_id, root_hash in root_hashes_list:
-                bt.logging.trace(f"{hotkey}: GPU {gpu_id}: {root_hash}")
-
-            # Calculate total times
-            total_multiplication_time = 0.0
-            total_merkle_tree_time = 0.0
-            num_gpus = len(gpu_timings_list)
-            for _, timing in gpu_timings_list:
-                total_multiplication_time += timing.get('gemm', 0.0)
-                total_merkle_tree_time += timing.get('merkle', 0.0)
-            average_multiplication_time = total_multiplication_time / num_gpus if num_gpus > 0 else 0.0
-            average_merkle_tree_time = total_merkle_tree_time / num_gpus if num_gpus > 0 else 0.0
-            bt.logging.trace(f"{hotkey}: Average Matrix Multiplication Time: {average_multiplication_time:.4f} seconds")
-            bt.logging.trace(f"{hotkey}: Average Merkle Tree Time: {average_merkle_tree_time:.4f} seconds")
-
-            timing_passed = False
-            if elapsed_time < time_tol + num_gpus * time_fp32 and average_multiplication_time < time_fp32:
-                timing_passed = True
-
-            # Step 7: Verify merkle proof
-            root_hashes = {gpu_id: root_hash for gpu_id, root_hash in root_hashes_list}
-            gpu_timings = {gpu_id: timing for gpu_id, timing in gpu_timings_list}
-            n = gpu_timings[0]['n'] if 0 in gpu_timings else n
-            indices = {}
-            num_indices = 1
-            for gpu_id in range(num_gpus):
-                indices[gpu_id] = [(np.random.randint(0, 2 * n), np.random.randint(0, n)) for _ in range(num_indices)]
-            send_challenge_indices(ssh_client, indices)
-            execution_output = execute_script_on_miner(ssh_client, mode='proof')
-            bt.logging.debug(f"{hotkey}: [Merkle Proof] Proof mode executed on miner.")
-            responses = receive_responses(ssh_client, num_gpus)
-            bt.logging.trace(f"{hotkey}: [Merkle Proof] Responses received from miner.")
-
-            verification_passed = verify_responses(seeds, root_hashes, responses, indices, n)
-            if verification_passed and timing_passed:
-                bt.logging.success(f"✅ {hotkey}: GPU Identification: Detected {num_gpus} x {gpu_name} GPU(s)")
-
-                # Step 8: Perform health check on the same miner after POG is successful
-                bt.logging.debug(f"🏥 {hotkey}: POG completed successfully, starting health check...")
-                bt.logging.trace(f"{hotkey}: [Step 8] Initiating health check...")
-                try:
-                    health_check_result = perform_health_check(axon, miner_info)
-                    if health_check_result:
-                        bt.logging.success(f"✅ {hotkey}: Health check passed")
-                        bt.logging.trace(f"{hotkey}: [Step 8] Health check completed successfully - miner is accessible")
-
-                        # Step 9: Perform template check after successful health check
-                        bt.logging.info(f"🖼️ {hotkey}: Health check passed, starting template availability check...")
-                        bt.logging.trace(f"{hotkey}: [Step 9] Initiating template check...")
-                        try:
-                            # Use Allocate request with checking=True for template verification
-                            template_check_result = await perform_template_check(self.wallet, axon)
-                            if template_check_result.get("success", False):
-                                templates_score = template_check_result.get("templates_score", 0.0)
-                                available_count = len(template_check_result.get("available_templates", []))
-                                total_count = template_check_result.get("total_templates", 0)
-                                bt.logging.success(
-                                    f"✅ {hotkey}: Template check passed - "
-                                    f"{available_count}/{total_count} templates available ({templates_score:.1%})"
-                                )
-                                bt.logging.trace(f"{hotkey}: [Step 9] Template check completed successfully")
-
-                                # Template check passed, publish success event and return
-                                await self._publish_pog_result_event(
-                                    hotkey=hotkey,
-                                    request_id=request_id,
-                                    start_time=start_time,
-                                    result="success",
-                                    benchmark_data={
-                                        "reported_gpu_number": num_gpus_reported,
-                                        "reported_gpu_name": gpu_name_reported,
-                                        "vram": vram,
-                                        "size_fp16": size_fp16,
-                                        "time_fp16": time_fp16,
-                                        "size_fp32": size_fp32,
-                                        "time_fp32": time_fp32,
-                                        "fp16_tflops": fp16_tflops,
-                                        "fp32_tflops": fp32_tflops,
-                                        "identified_gpu_number": num_gpus,
-                                        "identified_gpu_name": gpu_name,
-                                        "average_multiplication_time": average_multiplication_time,
-                                        "average_merkle_tree_time": average_merkle_tree_time,
-                                        "verification_passed": verification_passed,
-                                        "timing_passed": timing_passed,
-                                    },
-                                    health_check_result=health_check_result
-                                )
-                                return (hotkey, gpu_name, num_gpus)
-                            else:
-                                error_msg = template_check_result.get("error_message", "Unknown error")
-                                bt.logging.warning(f"⚠️ {hotkey}: Template check failed - {error_msg}")
-                                bt.logging.trace(f"{hotkey}: [Step 9] Template check failed - {error_msg}")
-                                bt.logging.info(f"⚠️ {hotkey}: GPU Identification: Excluded from dashboard due to template check failure")
-
-                                # Publish POG result with template check failure
-                                await self._publish_pog_result_event(
-                                    hotkey=hotkey,
-                                    request_id=request_id,
-                                    start_time=start_time,
-                                    result="failure",
-                                    error_details=f"Template check failed: {error_msg}",
-                                    health_check_result=health_check_result,
-                                    benchmark_data={
-                                        "reported_gpu_number": num_gpus_reported,
-                                        "reported_gpu_name": gpu_name_reported,
-                                        "vram": vram,
-                                        "size_fp16": size_fp16,
-                                        "time_fp16": time_fp16,
-                                        "size_fp32": size_fp32,
-                                        "time_fp32": time_fp32,
-                                        "fp16_tflops": fp16_tflops,
-                                        "fp32_tflops": fp32_tflops,
-                                        "identified_gpu_number": num_gpus,
-                                        "identified_gpu_name": gpu_name,
-                                        "average_multiplication_time": average_multiplication_time,
-                                        "average_merkle_tree_time": average_merkle_tree_time,
-                                        "verification_passed": verification_passed,
-                                        "timing_passed": timing_passed,
-                                    }
-                                )
-                                return (hotkey, None, -1)  # Use -1 to indicate template check failure
-                        except Exception as template_error:
-                            bt.logging.error(f"❌ {hotkey}: Error during template check: {template_error}")
-                            bt.logging.trace(f"{hotkey}: [Step 9] Template check error: {template_error}")
-                            bt.logging.info(f"⚠️ {hotkey}: GPU Identification: Excluded from dashboard due to template check error")
-
-                            # Publish POG result with template check error
-                            await self._publish_pog_result_event(
-                                hotkey=hotkey,
-                                request_id=request_id,
-                                start_time=start_time,
-                                result="error",
-                                error_details=f"Template check error: {str(template_error)}",
-                                health_check_result=health_check_result,
-                                benchmark_data={
-                                    "reported_gpu_number": num_gpus_reported,
-                                    "reported_gpu_name": gpu_name_reported,
-                                    "vram": vram,
-                                    "size_fp16": size_fp16,
-                                    "time_fp16": time_fp16,
-                                    "size_fp32": size_fp32,
-                                    "time_fp32": time_fp32,
-                                    "fp16_tflops": fp16_tflops,
-                                    "fp32_tflops": fp32_tflops,
-                                    "identified_gpu_number": num_gpus,
-                                    "identified_gpu_name": gpu_name,
-                                    "average_multiplication_time": average_multiplication_time,
-                                    "average_merkle_tree_time": average_merkle_tree_time,
-                                    "verification_passed": verification_passed,
-                                    "timing_passed": timing_passed,
-                                }
-                            )
-                            return (hotkey, None, -1)  # Use -1 to indicate template check error
-                    else:
-                        bt.logging.debug(f"⚠️ {hotkey}: Health check failed")
-                        bt.logging.trace(f"{hotkey}: [Step 8] Health check failed - miner is not accessible")
-                        bt.logging.info(f"⚠️ {hotkey}: GPU Identification: Aborted due to health check failure")
-                        await self._publish_pog_result_event(
-                            hotkey=hotkey,
-                            request_id=request_id,
-                            start_time=start_time,
-                            result='failure',
-                            error_details='Health check failed',
-                            health_check_result=False,
-                            benchmark_data={
-                                "reported_gpu_number": num_gpus_reported,
-                                "reported_gpu_name": gpu_name_reported,
-                                "vram": vram,
-                                "size_fp16": size_fp16,
-                                "time_fp16": time_fp16,
-                                "size_fp32": size_fp32,
-                                "time_fp32": time_fp32,
-                                "fp16_tflops": fp16_tflops,
-                                "fp32_tflops": fp32_tflops,
-                                "identified_gpu_number": num_gpus,
-                                "identified_gpu_name": gpu_name,
-                                "average_multiplication_time": average_multiplication_time,
-                                "average_merkle_tree_time": average_merkle_tree_time,
-                                "verification_passed": verification_passed,
-                                "timing_passed": timing_passed,
-                            },
-                        )
-                        return (hotkey, None, -1)  # Use -1 to indicate health check failure
-                except Exception as e:
-                    bt.logging.debug(f"❌ {hotkey}: Error during health check: {e}")
-                    bt.logging.trace(f"{hotkey}: [Step 8] Health check error: {e}")
-                    bt.logging.info(f"⚠️ {hotkey}: GPU Identification: Aborted due to health check error")
-                    await self._publish_pog_result_event(
-                        hotkey=hotkey,
-                        request_id=request_id,
-                        start_time=start_time,
-                        result='error',
-                        error_details=f'Health check failed: {str(e)}',
-                        benchmark_data={
-                            "reported_gpu_number": num_gpus_reported,
-                            "reported_gpu_name": gpu_name_reported,
-                            "vram": vram,
-                            "size_fp16": size_fp16,
-                            "time_fp16": time_fp16,
-                            "size_fp32": size_fp32,
-                            "time_fp32": time_fp32,
-                            "fp16_tflops": fp16_tflops,
-                            "fp32_tflops": fp32_tflops,
-                            "identified_gpu_number": num_gpus,
-                            "identified_gpu_name": gpu_name,
-                            "average_multiplication_time": average_multiplication_time,
-                            "average_merkle_tree_time": average_merkle_tree_time,
-                            "verification_passed": verification_passed,
-                            "timing_passed": timing_passed,
-                        },
-                        health_check_result=False,
-                    )
-                    return (hotkey, None, -1)  # Use -1 to indicate health check failure
-            else:
-                bt.logging.info(f"⚠️  {hotkey}: GPU Identification: Aborted due to verification failure (verification={verification_passed}, timing={timing_passed})")
-                await self._publish_pog_result_event(
-                    hotkey=hotkey,
-                    request_id=request_id,
-                    start_time=start_time,
-                    result='failure',
-                    error_details='Verification or timing failed',
-                    benchmark_data={
-                        "reported_gpu_number": num_gpus_reported,
-                        "reported_gpu_name": gpu_name_reported,
-                        "vram": vram,
-                        "size_fp16": size_fp16,
-                        "time_fp16": time_fp16,
-                        "size_fp32": size_fp32,
-                        "time_fp32": time_fp32,
-                        "fp16_tflops": fp16_tflops,
-                        "fp32_tflops": fp32_tflops,
-                        "identified_gpu_number": num_gpus,
-                        "identified_gpu_name": gpu_name,
-                        "average_multiplication_time": average_multiplication_time,
-                        "average_merkle_tree_time": average_merkle_tree_time,
-                        "verification_passed": verification_passed,
-                        "timing_passed": timing_passed,
-                    },
-                    health_check_result=False,
-                )
-                return (hotkey, None, 0)
-
-        except Exception as e:
-            bt.logging.debug(f"❌ {hotkey}: Error testing Miner: {e}", exc_info=False)
-            await self._publish_pog_result_event(
-                hotkey=hotkey,
-                request_id=request_id,
-                start_time=start_time,
-                result='error',
-                error_details=f'Testing miner failed: {str(e)}',
-            )
-            return (hotkey, None, 0)
-
-        finally:
-            try:
-                if ssh_client:
-                    ssh_client.close()
-            except Exception:
-                pass
-            try:
-                if allocation_status and miner_info:
-                    await self.deallocate_miner(axon, public_key)
-                    bt.logging.trace(f"{hotkey}: Miner de-allocated.")
-            except Exception as e:
-                bt.logging.debug(f"{hotkey}: Miner de-allocation failed: {e}")
+        return (axon.hotkey, None, 0)
 
     async def allocate_miner(
         self,
@@ -1317,12 +1350,13 @@ class Validator:
         private_key: str,
         public_key: str,
         ssh_public_key: str,
+        dendrite,
     ) -> dict | None:
         """
         Ask the allocator on ``axon`` for one container and return SSH creds.
 
         • No preliminary "checking=True" probe – we directly request the slot.
-        • Retries up to 5× on transient disconnects with linear back-off (1 s, 2 s, 3 s, 4 s).
+        • Retries up to 2× on transient disconnects with 1s back-off.
         • Returns *None* if the miner is busy/declined or all retries fail.
         """
         device_requirement = {
@@ -1337,70 +1371,79 @@ class Validator:
             "ssh_key": ssh_public_key,
         }
 
-        MAX_TRIES      = 5
-        BASE_BACKOFF_S = 1  # 1 s, 2 s, 3 s, 4 s
-
-        for attempt in range(1, MAX_TRIES + 1):
+        for attempt in range(1, self._allocation_max_retries + 1):
             try:
-                async with bt.dendrite(wallet=self.wallet) as dendrite:
-                    rsp = await dendrite(
-                        axon,
-                        Allocate(
-                            timeline=1,                    # one-shot job
-                            device_requirement=device_requirement,
-                            checking=False,            # real allocation
-                            public_key=public_key,
-                            docker_requirement=docker_requirement,
-                        ),
-                        timeout=60,
-                    )
+                # Use shared dendrite instance (passed from proof_of_gpu)
+                rsp = await dendrite(
+                    axon,
+                    Allocate(
+                        timeline=1,                    # one-shot job
+                        device_requirement=device_requirement,
+                        checking=False,            # real allocation
+                        public_key=public_key,
+                        docker_requirement=docker_requirement,
+                    ),
+                    timeout=self._allocation_timeout_sec,
+                )
 
-                    if rsp and rsp.get("status", False):
-                        # ---- decrypt allocator’s reply -----------------------
-                        dec  = rsa.decrypt_data(
-                            private_key.encode(),
-                            base64.b64decode(rsp["info"]),
-                        )
-                        info = json.loads(dec)
+                if rsp and rsp.get("status", False):
+                    # ---- decode allocator's reply -----------------------
+                    try:
+                        info_raw = rsp["info"]
+                        if private_key:
+                            # Old path: decrypt RSA encrypted response
+                            dec = rsa.decrypt_data(
+                                private_key.encode(),
+                                base64.b64decode(info_raw),
+                            )
+                            info = json.loads(dec)
+                        else:
+                            # New path: plain JSON (base64 encoded)
+                            info = json.loads(base64.b64decode(info_raw))
 
                         miner_info = {
                             'host': axon.ip,
                             'port': info['port'],
                             'username': info['username'],
-                            'password': info['password'],
                             'external_user_ports': info.get('external_user_ports', {}),
                         }
                         await self.pubsub_client.publish_miner_allocation(
                             miner_hotkey=axon.hotkey,
                             allocation_result=True,
                         )
-                        bt.logging.trace(f"Successfully allocated miner {axon.hotkey}")
                         return miner_info
-
-                    # allocator politely said “busy” or returned invalid status
-                    else:
-                        if not rsp:
-                            bt.logging.trace(f"{axon.hotkey}: No response received for miner allocation.")
-                        else:
-                            bt.logging.trace(f"{axon.hotkey}: Miner allocation request failed.")
-                            bt.logging.trace(f"{axon.hotkey}: Miner allocation response: {rsp}")
-
+                    except Exception as decode_err:
+                        bt.logging.warning(f"[{axon.hotkey[:8]}] allocation decode failed: {decode_err}")
                         await self.pubsub_client.publish_miner_allocation(
                             miner_hotkey=axon.hotkey,
                             allocation_result=False,
-                            allocation_error=(
-                                'No response received'
-                                if not rsp
-                                else 'Miner allocation request failed'
-                            ),
+                            allocation_error=f'Failed to decode allocation response: {decode_err}',
                         )
                         return None
+
+                # allocator politely said "busy" or returned invalid status
+                else:
+                    if not rsp:
+                        bt.logging.debug(f"[{axon.hotkey[:8]}] No response received for allocation")
+                    else:
+                        bt.logging.debug(f"[{axon.hotkey[:8]}] allocation rejected: {rsp.get('message', 'no message')}")
+
+                    await self.pubsub_client.publish_miner_allocation(
+                        miner_hotkey=axon.hotkey,
+                        allocation_result=False,
+                        allocation_error=(
+                            'No response received'
+                            if not rsp
+                            else 'Miner allocation request failed'
+                        ),
+                    )
+                    return None
 
             # -------- transient disconnects / 503 ------------------------------
             except ConnectionRefusedError as e:
                 bt.logging.warning(
                     f"{axon.hotkey}: connection refused "
-                    f"(attempt {attempt}/{MAX_TRIES}) – {e}"
+                    f"(attempt {attempt}/{self._allocation_max_retries}) – {e}"
                 )
                 await self.pubsub_client.publish_miner_allocation(
                     miner_hotkey=axon.hotkey,
@@ -1418,8 +1461,8 @@ class Validator:
                 return None
 
             # back-off before next retry for transient errors
-            if attempt < MAX_TRIES:
-                await asyncio.sleep(BASE_BACKOFF_S * attempt)
+            if attempt < self._allocation_max_retries:
+                await asyncio.sleep(self._retry_backoff_sec * attempt)
 
         # all retries exhausted
         await self.pubsub_client.publish_miner_allocation(
@@ -1429,12 +1472,13 @@ class Validator:
         )
         return None
 
-    async def deallocate_miner(self, axon, public_key):
+    async def deallocate_miner(self, axon, public_key, dendrite):
         """
         Deallocate a miner by sending a deregistration query.
 
         :param axon: Axon object containing miner details.
         :param public_key: Public key of the miner; if None, it will be retrieved from the database.
+        :param dendrite: Shared dendrite instance for making requests.
         """
         deallocation_error = None
 
@@ -1452,50 +1496,56 @@ class Validator:
 
                 if row:
                     info = json.loads(row[0])  # Parse JSON string from the 'details' column
-                    public_key = info.get("regkey")
+                    public_key = info.get("regkey") or ""
             except Exception as e:
                 deallocation_error = str(e)
                 bt.logging.trace(f"{axon.hotkey}: Missing public key: {e}")
 
         try:
             retry_count = 0
-            max_retries = 3
             allocation_status = True
 
-            while allocation_status and retry_count < max_retries:
+            while allocation_status and retry_count < self._deallocation_max_retries:
                 try:
-                    async with bt.dendrite(wallet=self.wallet) as dendrite:
-                        # Send deallocation query
-                        deregister_response = await dendrite(
-                            axon,
-                            Allocate(
-                                timeline=0,
-                                checking=False,
-                                public_key=public_key,
-                            ),
-                            timeout=15,
-                        )
+                    # Use shared dendrite instance (passed from proof_of_gpu)
+                    # Must send full device_requirement dict - minimal dicts don't serialize properly
+                    deregister_response = await dendrite(
+                        axon,
+                        Allocate(
+                            timeline=0,
+                            device_requirement={
+                                "cpu": {"count": 1},
+                                "gpu": {"count": 1, "capacity": 0, "type": ""},
+                                "hard_disk": {"capacity": 1_073_741_824},
+                                "ram": {"capacity": 1_073_741_824},
+                                "testing": True,
+                            },
+                            checking=False,
+                            public_key=public_key,
+                        ),
+                        timeout=self._deallocation_timeout_sec,
+                    )
 
-                        if deregister_response and deregister_response.get("status") is True:
-                            allocation_status = False
-                            bt.logging.trace(f"Deallocated miner {axon.hotkey}")
-                        else:
-                            retry_count += 1
-                            bt.logging.trace(
-                                f"{axon.hotkey}: Failed to deallocate miner. "
-                                f"(attempt {retry_count}/{max_retries})"
-                            )
-                            if retry_count >= max_retries:
-                                bt.logging.trace(f"{axon.hotkey}: Max retries reached for deallocating miner.")
-                            await asyncio.sleep(5)
+                    if deregister_response and deregister_response.get("status") is True:
+                        allocation_status = False
+                        bt.logging.trace(f"Deallocated miner {axon.hotkey}")
+                    else:
+                        retry_count += 1
+                        bt.logging.trace(
+                            f"{axon.hotkey}: Failed to deallocate miner. "
+                            f"(attempt {retry_count}/{self._deallocation_max_retries})"
+                        )
+                        if retry_count >= self._deallocation_max_retries:
+                            bt.logging.trace(f"{axon.hotkey}: Max retries reached for deallocating miner.")
+                        await asyncio.sleep(5)
                 except Exception as e:
                     retry_count += 1
                     deallocation_error = str(e)
                     bt.logging.trace(
                         f"{axon.hotkey}: Error while trying to deallocate miner. "
-                        f"(attempt {retry_count}/{max_retries}): {e}"
+                        f"(attempt {retry_count}/{self._deallocation_max_retries}): {e}"
                     )
-                    if retry_count >= max_retries:
+                    if retry_count >= self._deallocation_max_retries:
                         bt.logging.trace(f"{axon.hotkey}: Max retries reached for deallocating miner.")
                     await asyncio.sleep(5)
         except Exception as e:
@@ -1614,12 +1664,13 @@ class Validator:
                     gpu_groups[gpu_name] = []
                 gpu_groups[gpu_name].append(uid)
 
-            # Normalize GPU priorities
-            total_priority = sum(v for v in gpu_priorities.values() if v > 0)
+            # Normalize GPU priorities - sum only ACTIVE GPU priorities so all miner emission is distributed
+            total_priority = sum(gpu_priorities.get(gpu_name, 0) for gpu_name in gpu_groups.keys())
             if total_priority == 0:
                 bt.logging.warning("⚠️ All GPU priorities are 0. Entire emission will be burned.")
                 total_assigned_weight = 0.0
                 uid_weights = torch.zeros(len(self.uids), dtype=torch.float32)
+                gpu_actual_emission = {}
             else:
                 uid_weights = torch.zeros(len(self.uids), dtype=torch.float32)
                 total_assigned_weight = 0.0
@@ -1783,372 +1834,22 @@ class Validator:
         e = ep if ep is not None else self.current_epoch()
         return e * self.blocks_per_epoch
 
-    def my_sybil_slot(self, ep: int | None = None) -> tuple[int, int]:
-        """
-        Return (slot_start, slot_end) for the Sybil-PoG epoch.
-        If our hotkey isn’t in the on-chain validator set and allow_fake_sybil_slot=False,
-        Returns slot 0 otherwise.
-        """
-        ep    = ep if ep is not None else self.current_epoch()
-        start = self.epoch_start_block(ep)
-
-        # ─── grab validator set and our own hotkey ────────────────────────
-        vals = sorted(self.get_valid_validator_hotkeys())
-
-        hotkey_obj = self.wallet.hotkey
-        # Keypair itself vs actual ss58 string:
-        my_hk_obj = hotkey_obj
-        my_hk     = getattr(hotkey_obj, "ss58_address", None) or str(hotkey_obj)
-
-        if not hasattr(self, "_logged_val_epochs"):
-            self._logged_val_epochs: set[int] = set()
-        if ep not in self._logged_val_epochs:
-            bt.logging.trace(f"[Sybil-PoG] Validator set for epoch {ep} ({len(vals)} entries): {vals}")
-            self._logged_val_epochs.add(ep)
-
-        # ─── determine our slot index ─────────────────────────────────────
-        if my_hk in vals:
-            slots = len(vals)
-            idx   = vals.index(my_hk)
-        else:
-            # not in set → fallback
-            if self.allow_fake_sybil_slot:
-                bt.logging.warning(f"[Sybil-PoG] Hotkey {my_hk} not in validator set; using fake slot#0 (allow_fake_sybil_slot=True).")
-            else:
-                bt.logging.warning(
-                    f"[Sybil-PoG] Hotkey {my_hk} not in validator set "
-                    f"and allow_fake_sybil_slot=False → defaulting to slot#0 in ring size {len(vals)+1}."
-                )
-            slots = len(vals) + 1
-            idx   = 0
-
-        size       = self.blocks_per_epoch // slots
-        slot_start = start + idx * size
-        slot_end   = start + (idx + 1) * size - 1
-
-        # ─── trace the chosen slot once per epoch ──────────────────────────
-        if not hasattr(self, "_logged_slot_epochs"):
-            self._logged_slot_epochs: set[int] = set()
-        if ep not in self._logged_slot_epochs:
-            bt.logging.info(f"[Sybil-PoG] Epoch {ep}: slot {idx}/{slots} → blocks {slot_start}–{slot_end}")
-            self._logged_slot_epochs.add(ep)
-
-        return slot_start, slot_end
-
-    def _run_sybil_benchmark(
-        self, uid: int, axon: bt.AxonInfo
-    ) -> tuple[int, str, bool, str | None, int]:
-        """
-        Return (uid, hotkey, passed?, gpu_name, num_gpus) for one miner.
-        Contains extensive TRACE / INFO logging mirroring validator_sybil.py.
-        """
-        hotkey = axon.hotkey
-        allocation_ok, ssh = False, None
-
-        try:
-            bt.logging.trace(f"[Sybil-PoG] ▶ benchmarking {hotkey}")
-
-            # 1) allocation ---------------------------------------------------
-            priv, pub = rsa.generate_key_pair()
-            bt.logging.trace(f"[Sybil-PoG] {hotkey}: starting allocation")
-            fut = asyncio.run_coroutine_threadsafe(
-                self.allocate_miner(axon, priv, pub), self.loop
-            )
-            miner_info = fut.result()
-            bt.logging.trace(f"[Sybil-PoG] {hotkey}: miner_info after allocation = {repr(miner_info)}")
-            if miner_info is None:
-                bt.logging.trace(f"[Sybil-PoG] {hotkey}: allocator busy / no slot (miner_info is None after allocation SUCCESS)")
-                return uid, hotkey, False, None, 0
-
-            allocation_ok = True
-            bt.logging.trace(f"[Sybil-PoG] {hotkey}: allocated, about to start benchmark, allocation_ok={allocation_ok}")
-
-            # 2) SSH connect --------------------------------------------------
-            ssh = paramiko.SSHClient()
-            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            ssh.connect(miner_info["host"],
-                        port     = miner_info.get("port", 22),
-                        username = miner_info["username"],
-                        password = miner_info["password"],
-                        timeout  = 10)
-            bt.logging.trace(f"[Sybil-PoG] {hotkey}: SSH OK")
-
-            # 3) upload miner script if needed --------------------------------
-            mp_conf  = self.config_data["merkle_proof"]
-            m_path   = mp_conf["miner_script_path"]
-            miner_py = Path(m_path).read_bytes()
-
-            local_sha  = hashlib.sha256(miner_py).hexdigest()
-            try:
-                remote_sha = ssh.exec_command(
-                    "sha256sum /tmp/miner_script.py | cut -d' ' -f1"
-                )[1].read().decode().strip()
-            except Exception:
-                remote_sha = ""
-
-            if local_sha != remote_sha:
-                bt.logging.trace(f"[Sybil-PoG] {hotkey}: uploading miner_script.py")
-                with ssh.open_sftp().file("/tmp/miner_script.py", "wb") as f:
-                    f.write(miner_py)
-                ssh.exec_command("chmod 755 /tmp/miner_script.py")
-
-            # 4) GPU info -----------------------------------------------------
-            gpu_info = json.loads(
-                ssh.exec_command(
-                    "python3 /tmp/miner_script.py --mode gpu_info"
-                )[1].read().decode()
-            )
-            gnum  = gpu_info["num_gpus"]
-            gname = gpu_info["gpu_names"][0].strip('" \t')
-            bt.logging.trace(f"[Sybil-PoG] {hotkey}: reports {gnum} × {gname}")
-
-            GPU_TM   = self.config_data["gpu_time_models"]
-            GPU_VRAM = self.config_data["gpu_performance"]["GPU_AVRAM"]
-            BUFFER   = float(mp_conf["buffer_factor"])
-            SPOTS    = int(mp_conf["spot_per_gpu"])
-
-            if gname not in GPU_TM or gname not in GPU_VRAM:
-                bt.logging.trace(f"[Sybil-PoG] {hotkey}: unknown GPU model")
-                return uid, hotkey, False, None, 0
-
-            m       = GPU_TM[gname]
-            t_exp   = m["a0"] + m["a1"] * gnum + m["a2"] * (gnum ** 2)
-            deadline= t_exp * m["tol"]
-            bt.logging.trace(f"[Sybil-PoG] {hotkey}: t_exp={t_exp:.2f}s  "
-                            f"deadline={deadline:.2f}s")
-
-            # 5) matrix size --------------------------------------------------
-            vram_gib = float(GPU_VRAM[gname])
-            n = max(256, int(((vram_gib * BUFFER * 1e9) / (3 * 4)) ** 0.5 // 32 * 32))
-            bt.logging.trace(f"[Sybil-PoG] {hotkey}: matrix n={n}")
-
-            # 6) seeds file ---------------------------------------------------
-            seeds = {gid: (random.randrange(2**32), random.randrange(2**32))
-                    for gid in range(gnum)}
-            seed_txt = "\n".join(
-                [str(n)] + [f"{gid} {a} {b}" for gid, (a, b) in seeds.items()]
-            )
-            with ssh.open_sftp().file("/tmp/seeds.txt", "wb") as f:
-                f.write(seed_txt.encode())
-
-            # 7) compute phase ------------------------------------------------
-            t0   = time.time()
-            out  = ssh.exec_command(
-                "python3 /tmp/miner_script.py --mode compute"
-            )[1].read().decode()
-            t_compute = time.time() - t0
-            bt.logging.trace(f"[Sybil-PoG] {hotkey}: compute {t_compute:.2f}s")
-            if t_compute > deadline:
-                bt.logging.trace(f"[Sybil-PoG] {hotkey}: exceeded deadline")
-                return uid, hotkey, False, None, 0
-
-            roots = {gid: bytes.fromhex(rh) for gid, rh in
-                    json.loads(next(l[6:] for l in out.splitlines()
-                                    if l.startswith("ROOTS:")))}
-
-            # 8) challenge indices -------------------------------------------
-            idxs = {
-                gid: [(random.randrange(0, 2 * n), random.randrange(0, n))
-                    for _ in range(SPOTS)]
-                for gid in range(gnum)
-            }
-            idx_txt = "\n".join(
-                f"{gid} " + ";".join(f"{i},{j}" for i, j in pairs)
-                for gid, pairs in idxs.items()
-            )
-            with ssh.open_sftp().file("/tmp/challenge_indices.txt", "wb") as f:
-                f.write(idx_txt.encode())
-
-            # 9) proof phase --------------------------------------------------
-            ssh.exec_command("python3 /tmp/miner_script.py --mode proof")[1].read()
-
-            # 10) download responses -----------------------------------------
-            resps = {}
-            with ssh.open_sftp() as sftp:
-                for gid in range(gnum):
-                    tmp = tempfile.NamedTemporaryFile(delete=False).name
-                    sftp.get(f"/dev/shm/resp_{gid}.npy", tmp)
-                    resps[gid] = np.load(tmp, allow_pickle=True).item()
-                    os.unlink(tmp)
-
-            # 11) verification ----------------------------------------------
-            for gid in range(gnum):
-                sA, sB = seeds[gid]
-                for (i, j), row, proof in zip(
-                        idxs[gid], resps[gid]["rows"], resps[gid]["proofs"]):
-
-                    if i < n:
-                        exp = sum(prng(sA, i, k) * prng(sB, k, j) for k in range(n))
-                    else:
-                        exp = sum(prng(sB, i - n, k) * prng(sA, k, j) for k in range(n))
-
-                    if (not np.isclose(exp, row[j], rtol=1e-3, atol=1e-4) or
-                            not merkle_ok(row, proof, roots[gid], i, 2 * n)):
-                        bt.logging.trace(f"[Sybil-PoG] {hotkey}: proof mismatch")
-                        return uid, hotkey, False, None, 0
-
-            bt.logging.trace(f"[Sybil-PoG] {hotkey}: PASS")
-            return uid, hotkey, True, gname, gnum
-
-        except Exception as e:
-            bt.logging.trace(f"[Sybil-PoG] {hotkey}: exception {e}")
-            return uid, hotkey, False, None, 0
-
-        finally:
-            if allocation_ok:
-                asyncio.run_coroutine_threadsafe(
-                    self.deallocate_miner(axon, pub), self.loop
-                )
-            if ssh:
-                try:
-                    ssh.close()
-                except Exception:
-                    pass
-
-    async def proof_of_gpu_sybil(self) -> None:
-        """
-        Orchestrates the Sybil-PoG benchmark **once per Sybil epoch** inside
-        our personal validator slot.
-
-        High-level flow:
-        • wait until our slot starts (w/ small random jitter)
-        • pick miners that are *not* currently allocated elsewhere
-        • run `_run_sybil_benchmark()` on them in parallel
-        • update / purge PoG-DB entries accordingly
-        """
-        try:
-            # ─── 1 determine slot ───────────────────────────────────────────
-            slot_start, slot_end = self.my_sybil_slot()
-            bt.logging.trace(
-                f"[Sybil-PoG] My slot this epoch: blocks {slot_start}–{slot_end}"
-            )
-
-            latest_start = slot_end - self.max_challenge_blocks
-            if self.current_block >= latest_start:
-                bt.logging.debug("[Sybil-PoG] Slot almost over – skipping.")
-                return
-
-            # ─── 2 un-predictable delay so miners can’t pre-compute ─────────
-            delay_blocks = random.randint(
-                1, min(self.rand_delay_blocks_max, latest_start - self.current_block),
-            )
-            bt.logging.trace(
-                f"[Sybil-PoG] Sleeping {delay_blocks} blocks "
-                f"({delay_blocks*12}s) before launching challenges."
-            )
-            await asyncio.sleep(delay_blocks * 12)
-
-            # ─── 3 choose target miners ─────────────────────────────────────
-            self._queryable_uids = self.get_queryable()
-            allocated = self.wandb.get_allocated_hotkeys(
-                self.get_valid_validator_hotkeys(), True
-            )
-            axons = [
-                (uid, ax) for uid, ax in self._queryable_uids.items()
-                if ax.hotkey not in allocated
-            ]
-            bt.logging.info(f"[Sybil-PoG] Challenging {len(axons)} miners")
-
-            # ─── 4 launch benchmarks in parallel threads ────────────────────
-            loop = asyncio.get_running_loop()
-
-            num_miners = len(axons)
-            bt.logging.trace(f"[Sybil-PoG] Launching benchmarks for {num_miners} miners with max_workers={num_miners}")
-
-            # dedicate a *fresh* pool large enough for *all* miners this round
-            with concurrent.futures.ThreadPoolExecutor(max_workers=len(axons)) as pool:
-                tasks = [
-                    loop.run_in_executor(pool, self._run_sybil_benchmark, uid, ax)
-                    for uid, ax in axons
-                ]
-                slot_size = slot_end - slot_start
-                available_blocks = max(0, slot_size - delay_blocks)
-                timeout_blocks = min(self.max_challenge_blocks, available_blocks)
-                timeout_seconds = max(60, timeout_blocks * 12)
-
-                bt.logging.trace(f"[Sybil-PoG] Timeout set to {timeout_seconds:.1f}s "
-                                f"(slot size: {slot_size}, delay: {delay_blocks}, "
-                                f"available (blocks): {available_blocks}, capped to (blocks): {timeout_blocks})")
-
-                try:
-                    done, pending = await asyncio.wait(tasks, timeout=timeout_seconds)
-                    bt.logging.info(f"[Sybil-PoG] Benchmarks done. {len(done)} completed, {len(pending)} pending")
-                except Exception as e:
-                    bt.logging.error(f"[Sybil-PoG] Exception during asyncio.wait: {e}")
-                    return
-
-            for fut in pending:
-                fut.cancel()
-                bt.logging.warning(f"[Sybil-PoG] Task {fut} timed out and was cancelled")
-
-            for fut in done:
-                try:
-                    result = fut.result()
-                    # Log result
-                except Exception as e:
-                    bt.logging.error(f"[Sybil-PoG] Task Exception: {e!r}")
-
-            # ─── 5 post-process results ─────────────────────────────────────
-            passed, failed = 0, 0
-
-            # 1) all on-chain hotkeys
-            onchain_hotkeys = {
-                self.metagraph.axons[uid].hotkey
-                for uid in self.uids
-            }
-
-            # 2) track who actually passed this round
-            passed_hotkeys = set(allocated)
-            for fut in done:
-                uid, hotkey, ok, gname, gnum = fut.result()
-                if ok:
-                    update_pog_stats(self.db, hotkey, gname, gnum)
-                    passed += 1
-                    passed_hotkeys.add(hotkey)
-                else:
-                    failed += 1
-
-            # 3) rebuild penalized_hotkeys from scratch:
-            #    everyone on-chain who didn’t pass this round
-            self.penalized_hotkeys = [
-                hk for hk in onchain_hotkeys
-                if hk not in passed_hotkeys
-            ]
-
-            bt.logging.trace(f"PoG post-process: {passed} passed, {failed} failed; penalized: {self.penalized_hotkeys}")
-
-            bt.logging.success(
-                f"[Sybil-PoG] Completed – {passed} PASS, {failed} FAIL, "
-                f"{len(pending)} timeout."
-            )
-            self.sync_scores()
-
-        except Exception as e:
-            bt.logging.error(f"[Sybil-PoG] exception: {e}\n{traceback.format_exc()}")
-
     async def start(self):
         """The Main Validation Loop"""
         self.loop = asyncio.get_running_loop()
 
         # Step 5: Perform queries to miners, scoring, and weight
-        block_next_pog = 1
+        block_next_pog = self.current_block + 1
         block_next_sync_status = 1
         block_next_set_weights = self.current_block + weights_rate_limit
         block_next_hardware_info = 1
         block_next_miner_checking = 1
+        block_next_allocation_sync = self.current_block + 1  # Allocation sync on first block
 
-        last_pog_epoch   = -1
-        last_sybil_epoch = -1
-
-        time_next_pog = None
         time_next_sync_status = None
         time_next_set_weights = None
         time_next_hardware_info = None
-
-        time_next_legacy_pog  = None
-        time_next_sybil       = None
-        block_next_legacy_pog = 1
-        block_next_sybil      = 1
+        time_next_pog = None
 
         bt.logging.info("Starting validator loop.")
 
@@ -2164,7 +1865,6 @@ class Validator:
         while True:
             try:
                 self.sync_local()
-                epoch = self.current_epoch()
                 self.refresh_config_from_server()
 
                 hk_obj = self.wallet.hotkey
@@ -2173,88 +1873,29 @@ class Validator:
                 if self.current_block not in self.blocks_done:
                     self.blocks_done.add(self.current_block)
 
-                    time_next_pog = self.next_info(not block_next_pog == 1, block_next_pog)
                     time_next_sync_status = self.next_info(not block_next_sync_status == 1, block_next_sync_status)
                     time_next_set_weights = self.next_info(not block_next_set_weights == 1, block_next_set_weights)
                     time_next_hardware_info = self.next_info(
                         not block_next_hardware_info == 1 and self.validator_perform_hardware_query, block_next_hardware_info
                     )
+                    time_next_pog = self.next_info(not block_next_pog == 1, block_next_pog)
 
-                    if self.epoch_is_pog(epoch):          # we are in an even epoch already
-                        next_legacy_epoch = epoch + 2     # jump to the *next* even epoch
-                    else:                                 # we are in an odd epoch
-                        next_legacy_epoch = epoch + 1     # next epoch is even
-                    block_next_legacy_pog = self.epoch_start_block(next_legacy_epoch)
-                    time_next_legacy_pog  = calculate_next_block_time(
-                        self.current_block, block_next_legacy_pog
-                    )
-
-                    # Next personal Sybil slot
-                    if not self.epoch_is_pog(epoch):        # we’re already in a Sybil epoch
-                        slot_start, _ = self.my_sybil_slot(epoch)
-                        if self.current_block < slot_start:         # slot still ahead
-                            block_next_sybil = slot_start
-                            next_sybil_epoch = epoch
-                        else:                                       # slot has passed: jump 2 epochs
-                            next_sybil_epoch = epoch + 2
-                            block_next_sybil, _ = self.my_sybil_slot(next_sybil_epoch)
-                    else:                                   # currently even epoch → next epoch is odd
-                        next_sybil_epoch = epoch + 1
-                        block_next_sybil, _ = self.my_sybil_slot(next_sybil_epoch)
-
-                    time_next_sybil = calculate_next_block_time(
-                        self.current_block, block_next_sybil
-                    )
-
-                    DEBUG_FAST_SYBIL = False   # <— flip to False to restore normal scheduling
-
-                    if DEBUG_FAST_SYBIL:
-                        # one-time initialisation
-                        if not hasattr(self, "_next_fast_sybil_block"):
-                            self._next_fast_sybil_block = self.current_block + 	self.max_challenge_blocks + 1
-                            bt.logging.info(
-                                f"[DEBUG] First fast Sybil planned at block {self._next_fast_sybil_block}"
-                            )
-
-                        # launch when due
-                        if self.current_block >= self._next_fast_sybil_block:
-                            if self.gpu_task is None or self.gpu_task.done():
-                                bt.logging.info("[DEBUG] Launching fast-loop proof_of_gpu_sybil()")
-                                # skip the slot checks INSIDE that function for debug runs
-                                self.gpu_task = asyncio.create_task(self.proof_of_gpu_sybil())
-
-                            # schedule the next run just once, *after* we decide to launch
-                            jitter  = random.randint(1, self.rand_delay_blocks_max)   # 1-5 blocks
-                            cushion = random.randint(2, 3)                       # safety margin
-                            self._next_fast_sybil_block = (
-                                self.current_block + self.max_challenge_blocks + jitter + cushion
-                            )
-                            bt.logging.info(
-                                f"[DEBUG] Next fast Sybil planned at block {self._next_fast_sybil_block}"
-                            )
-
-                    else:
-                        if self.epoch_is_pog(epoch):           # even → legacy PoG
-                            if epoch != last_pog_epoch and \
-                            self.current_block % self.blocks_per_epoch == 0:
-                                if self.gpu_task is None or self.gpu_task.done():
-                                    self.gpu_task = asyncio.create_task(self.proof_of_gpu())
-                                    self.gpu_task.add_done_callback(self.on_gpu_task_done)
-                                last_pog_epoch = epoch
-                        else:                                   # odd → PoG-Sybil
-                            if my_hk in self.sybil_eligible_hotkeys:
-                                slot_start, _ = self.my_sybil_slot(epoch)
-                                if (epoch != last_sybil_epoch and
-                                        self.current_block == slot_start):
-                                    if self.gpu_task is None or self.gpu_task.done():
-                                        self.gpu_task = asyncio.create_task(self.proof_of_gpu_sybil())
-                                    last_sybil_epoch = epoch
+                    # Schedule PoG3 on block cadence.
+                    if self.current_block >= block_next_pog:
+                        if self.gpu_task is None or self.gpu_task.done():
+                            bt.logging.info(f"🚀 Scheduling PoG3 at block {self.current_block}")
+                            self.gpu_task = asyncio.create_task(self.proof_of_gpu())
+                            self.gpu_task.add_done_callback(self.on_gpu_task_done)
+                        else:
+                            bt.logging.debug("PoG3 deferred: previous task still running")
+                        block_next_pog = self.current_block + self.pog_interval_blocks
+                        time_next_pog = calculate_next_block_time(self.current_block, block_next_pog)
 
                     # Perform specs queries
                     if (self.current_block % block_next_hardware_info == 0 and self.validator_perform_hardware_query) or (
                         block_next_hardware_info < self.current_block and self.validator_perform_hardware_query
                     ):
-                        block_next_hardware_info = self.current_block + 150  # 150 -> ~ every 30 minutes
+                        block_next_hardware_info = self.current_block + self._block_interval_hardware_info
 
                         if not hasattr(self, "_queryable_uids"):
                             self._queryable_uids = self.get_queryable()
@@ -2265,7 +1906,7 @@ class Validator:
                     # Perform miner checking
                     if self.current_block % block_next_miner_checking == 0 or block_next_miner_checking < self.current_block:
                         # Next block the validators will do port checking again.
-                        block_next_miner_checking = self.current_block + 50  # 300 -> every 60 minutes
+                        block_next_miner_checking = self.current_block + self._block_interval_miner_check
 
                         # Filter axons with stake and ip address.
                         self._queryable_uids = self.get_queryable()
@@ -2273,17 +1914,22 @@ class Validator:
                         # self.sync_checklist()
 
                     if self.current_block % block_next_sync_status == 0 or block_next_sync_status < self.current_block:
-                        block_next_sync_status = self.current_block + 25  # ~ every 5 minutes
+                        block_next_sync_status = self.current_block + self._block_interval_sync_status
                         self.sync_status()
                         # Log chain data to wandb
                         chain_data = {
                             "Block": self.current_block,
-                            "Stake": float(self.metagraph.S[self.validator_subnet_uid]),
-                            "Rank": float(self.metagraph.R[self.validator_subnet_uid]),
-                            "vTrust": float(self.metagraph.validator_trust[self.validator_subnet_uid]),
-                            "Emission": float(self.metagraph.E[self.validator_subnet_uid]),
+                            "Stake": self._safe_get_metric(self.metagraph.S),
+                            "Rank": self._safe_get_metric(self.metagraph.R),
+                            "vTrust": self._safe_get_metric(self.metagraph.validator_trust),
+                            "Emission": self._safe_get_metric(self.metagraph.E),
                         }
                         self.wandb.log_chain_data(chain_data)
+
+                    # Sync allocation status to validation API (every block)
+                    if self.current_block >= block_next_allocation_sync:
+                        await self.sync_allocation_status_to_api()
+                        block_next_allocation_sync = self.current_block + 1
 
                     # Periodically update the weights on the Bittensor blockchain, ~ every 20 minutes
                     if self.current_block - self.last_updated_block > weights_rate_limit:
@@ -2294,10 +1940,24 @@ class Validator:
                         self.blocks_done.clear()
                         self.blocks_done.add(self.current_block)
 
-                    # Refresh tokens periodically (every 30 minutes)
-                    if self.current_block % 600 == 0:  # Approximately every 30 minutes at 3s block time
+                    # Refresh tokens periodically
+                    if self.current_block % self._block_interval_token_refresh == 0:
                         bt.logging.info("Refreshing SN27 token gateway tokens")
                         self.pubsub_client.refresh_credentials()
+
+                # Per-block summary log
+                bt.logging.info(
+                    (
+                        f"Block:{self.current_block} | "
+                        f"Stake:{self._safe_get_metric(self.metagraph.S)} | "
+                        f"Rank:{self._safe_get_metric(self.metagraph.R)} | "
+                        f"vTrust:{self._safe_get_metric(self.metagraph.validator_trust)} | "
+                        f"Emission:{self._safe_get_metric(self.metagraph.E)} | "
+                        f"next_PoG:    #{block_next_pog} ~ {time_next_pog} | "
+                        f"sync_status:   #{block_next_sync_status} ~ {time_next_sync_status} | "
+                        f"set_weights:   #{block_next_set_weights} ~ {time_next_set_weights} | "
+                    )
+                )
 
                 await asyncio.sleep(1)
 
@@ -2312,19 +1972,13 @@ class Validator:
                 bt.logging.success("Keyboard interrupt detected. Exiting validator.")
                 exit()
 
-            bt.logging.info(
-            (
-                f"Block:{self.current_block} | "
-                f"Stake:{self.metagraph.S[self.validator_subnet_uid]} | "
-                f"Rank:{self.metagraph.R[self.validator_subnet_uid]} | "
-                f"vTrust:{self.metagraph.validator_trust[self.validator_subnet_uid]} | "
-                f"Emission:{self.metagraph.E[self.validator_subnet_uid]} | "
-                f"next_PoG_legacy:  #{block_next_legacy_pog} ~ {time_next_legacy_pog} | "
-                f"next_PoG_sybil: #{block_next_sybil} ~ {time_next_sybil} | "
-                f"sync_status:   #{block_next_sync_status} ~ {time_next_sync_status} | "
-                f"set_weights:   #{block_next_set_weights} ~ {time_next_set_weights} | "
-            )
-)
+async def _main():
+    validator = Validator()
+    await asyncio.gather(
+        validator.start(),
+        validator.pubsub_client.subscribe_to_topics(),
+    )
+
 
 def main():
     """
@@ -2333,9 +1987,7 @@ def main():
     This function initializes and runs the neuron. It handles the main loop, state management, and interaction
     with the Bittensor network.
     """
-    validator = Validator()
-    asyncio.run(validator.start())
-    asyncio.run(validator.pubsub_client.subscribe_to_topics())
+    asyncio.run(_main())
 
 
 if __name__ == "__main__":
