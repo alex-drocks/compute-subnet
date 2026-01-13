@@ -3,7 +3,7 @@
 # ════════════════════════════════════════════════════════════════════
 attestation_layer:
   # Attestation Layer URL (centralized service for miner status, allocations, PoG results)
-  url: "http://135.181.63.200/v1"
+  url: "http://135.181.8.206/v1"
   # Auth token (can be overridden via environment variable)
   auth_token: ""
   # Timeout settings
