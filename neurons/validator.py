@@ -766,18 +766,41 @@ class Validator:
         Always sends complete state of all miners (allocated vs free).
         This is simple, self-healing, and the overhead for 250-1000 keys
         every few seconds is negligible (~60KB).
+
+        IMPORTANT: We read from the attestation layer first and merge with
+        local state to avoid race conditions where multiple validators
+        could overwrite each other's allocations. If the remote fetch fails,
+        we skip the sync entirely to avoid overwriting valid remote state.
         """
         try:
-            # 1. Get current allocations from database
+            # 1. Read current state from attestation layer first (required for safe merge)
+            # If this fails, we skip the sync to avoid overwriting remote allocations
+            try:
+                remote_status = self.api_client.fetch_allocations_status(scope="all")
+            except Exception as e:
+                bt.logging.warning(f"Failed to fetch remote allocations, skipping sync: {e}")
+                return
+
+            if remote_status is None or not isinstance(remote_status, dict):
+                bt.logging.warning("Invalid response from attestation layer, skipping sync")
+                return
+
+            # Extract allocated hotkeys from remote state
+            remote_allocations = set()
+            for item in remote_status.get("allocations", []):
+                if item.get("state") == "allocated":
+                    remote_allocations.add(item.get("key"))
+
+            # 2. Get current allocations from local database
             cursor = self.db.get_cursor()
             try:
                 cursor.execute("SELECT hotkey FROM allocation")
                 rows = cursor.fetchall()
-                current_allocations = {row[0] for row in rows}
+                local_allocations = {row[0] for row in rows}
             finally:
                 cursor.close()
 
-            # 2. Get all queryable miner hotkeys (with bounds checking)
+            # 3. Get all queryable miner hotkeys (with bounds checking)
             queryable_uids = self.get_queryable()
             hotkeys_len = len(self.metagraph.hotkeys)
             all_hotkeys = {
@@ -786,16 +809,21 @@ class Validator:
                 if 0 <= uid < hotkeys_len
             }
 
-            # 3. Build full state payload
+            # 4. Merge: a miner is allocated if allocated locally OR remotely
+            # This ensures we never accidentally mark a miner as free when
+            # another validator has allocated it
+            merged_allocations = local_allocations | remote_allocations
+
+            # 5. Build full state payload with merged allocations
             allocations = []
             for hk in all_hotkeys:
-                state = "allocated" if hk in current_allocations else "free"
+                state = "allocated" if hk in merged_allocations else "free"
                 allocations.append({"key": hk, "state": state})
 
             if not allocations:
                 return  # No miners to sync
 
-            # 4. Send to API
+            # 6. Send to API
             result = self.api_client.sync_allocations(allocations)
 
             if result:
