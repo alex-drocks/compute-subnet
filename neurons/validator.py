@@ -633,7 +633,8 @@ class Validator:
 
                 prev = existing_stats.get(uid, {})
                 base_score = float(prev.get("score", 0.0)) / 100.0
-                gpu_specs = prev.get("gpu_specs")
+                # Only carry forward gpu_specs if miner has a valid PoG score
+                gpu_specs = prev.get("gpu_specs") if base_score > 0 else None
                 allocated_flag = bool(prev.get("allocated", False))
 
                 # Reliability score: prefer W&B aggregate, else keep local value, else neutral 1.0
