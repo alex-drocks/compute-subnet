@@ -274,6 +274,7 @@ class Validator:
         self._allocation_max_retries = int(vali_cfg.get("allocation_max_retries", 2))
         self._deallocation_max_retries = int(vali_cfg.get("deallocation_max_retries", 3))
         self._ssh_max_retries = int(vali_cfg.get("ssh_max_retries", 3))
+        self._validation_alloc_max_retries = int(vali_cfg.get("validation_alloc_max_retries", 4))
         self._retry_backoff_sec = float(vali_cfg.get("retry_backoff_sec", 5))
 
         self.pubsub_client = PubSubClient(
@@ -531,6 +532,8 @@ class Validator:
             self._deallocation_max_retries = v
         if (v := _safe_int("ssh_max_retries", 3, min_val=0)) is not None:
             self._ssh_max_retries = v
+        if (v := _safe_int("validation_alloc_max_retries", 4, min_val=1)) is not None:
+            self._validation_alloc_max_retries = v
         if (v := _safe_float("retry_backoff_sec", 5.0)) is not None:
             self._retry_backoff_sec = v
         if (v := _safe_int("pull_interval", 60)) is not None:
@@ -1154,71 +1157,84 @@ class Validator:
 
         # Test containers use separate SSH port (4445) and per-validator naming
         # All validators can verify GPU UUID via test allocations, regardless of production allocation
+        # Retry entire allocation+SSH flow if SSH probe fails
+        api_uuid = best_inst.primary_gpu_uuid if best_inst else None
+        max_validation_attempts = self._validation_alloc_max_retries
 
-        miner_info = None
-        try:
-            # Skip RSA key generation - send empty public_key, miner returns plain JSON
-            # This is backwards compatible: old miners will fail gracefully, new miners return plain
-            public_key = ""
-            miner_info = await self.allocate_miner(axon, "", "", self.ssh_public_key, dendrite)
-            allocation_ok = miner_info is not None
-        except Exception as e:
-            bt.logging.debug(f"[{hotkey[:8]}] allocation failed - {e}")
+        for validation_attempt in range(1, max_validation_attempts + 1):
+            miner_info = None
             allocation_ok = False
-        bt.logging.debug(f"[{hotkey[:8]}] allocation={'OK' if allocation_ok else 'FAIL'}")
+            gpu_uuid = None
 
-        # Use try/finally to guarantee deallocation whenever allocation succeeds
-        try:
-            if miner_info:
-                try:
-                    ok, uuid_val, name_val, count_val = await self._fetch_remote_gpu(miner_info)
-                    bt.logging.debug(f"[{hotkey[:8]}] SSH probe: ok={ok}, uuid={uuid_val}, gpu={name_val}, count={count_val}")
-                    if ok:
-                        gpu_uuid = uuid_val
-                except Exception as e:
-                    bt.logging.debug(f"[{hotkey[:8]}] SSH probe failed - {e}")
+            try:
+                # Skip RSA key generation - send empty public_key, miner returns plain JSON
+                # This is backwards compatible: old miners will fail gracefully, new miners return plain
+                public_key = ""
+                miner_info = await self.allocate_miner(axon, "", "", self.ssh_public_key, dendrite)
+                allocation_ok = miner_info is not None
+            except Exception as e:
+                bt.logging.debug(f"[{hotkey[:8]}] allocation failed - {e}")
+                allocation_ok = False
+            bt.logging.debug(f"[{hotkey[:8]}] allocation={'OK' if allocation_ok else 'FAIL'} (attempt {validation_attempt}/{max_validation_attempts})")
 
-            api_uuid = best_inst.primary_gpu_uuid if best_inst else None
-            uuid_match = (
-                gpu_uuid is not None
-                and best_inst is not None
-                and api_uuid is not None
-                and gpu_uuid == api_uuid
-            )
-            # Detailed UUID comparison logging
-            if not uuid_match and (gpu_uuid or api_uuid):
-                bt.logging.debug(
-                    f"[{hotkey[:8]}] UUID mismatch: ssh={gpu_uuid} vs api={api_uuid}"
+            # Use try/finally to guarantee deallocation whenever allocation succeeds
+            try:
+                if miner_info:
+                    try:
+                        ok, uuid_val, name_val, count_val = await self._fetch_remote_gpu(miner_info)
+                        bt.logging.debug(f"[{hotkey[:8]}] SSH probe: ok={ok}, uuid={uuid_val}, gpu={name_val}, count={count_val}")
+                        if ok:
+                            gpu_uuid = uuid_val
+                    except Exception as e:
+                        bt.logging.debug(f"[{hotkey[:8]}] SSH probe failed - {e}")
+
+                uuid_match = (
+                    gpu_uuid is not None
+                    and best_inst is not None
+                    and api_uuid is not None
+                    and gpu_uuid == api_uuid
                 )
-            bt.logging.debug(f"[{hotkey[:8]}] uuid_match={uuid_match}, api_status={api_status}")
 
-            base_pass = allocation_ok and api_status == "pass" and uuid_match
-            health_ok = None
-            if base_pass and miner_info:
-                try:
-                    health_ok = perform_health_check(axon, miner_info, self.ssh_private_key)
-                    bt.logging.debug(f"[{hotkey[:8]}] health_check={health_ok}")
-                except Exception as e:
-                    bt.logging.debug(f"[{hotkey[:8]}] health_check error: {e}")
-                    health_ok = False
+                # If allocation succeeded but SSH failed, retry the entire flow
+                if allocation_ok and gpu_uuid is None and validation_attempt < max_validation_attempts:
+                    bt.logging.debug(f"[{hotkey[:8]}] SSH probe failed, will retry full validation")
+                    continue  # Deallocate in finally, then retry
 
-            passed = base_pass and (health_ok is not False)
+                # Detailed UUID comparison logging
+                if not uuid_match and (gpu_uuid or api_uuid):
+                    bt.logging.debug(
+                        f"[{hotkey[:8]}] UUID mismatch: ssh={gpu_uuid} vs api={api_uuid}"
+                    )
+                bt.logging.debug(f"[{hotkey[:8]}] uuid_match={uuid_match}, api_status={api_status}")
 
-            if api_status == "pass":
-                base_score = 1.0 if passed else 0.0
-            elif api_status == "pending":
-                base_score = 1.0 if (allocation_ok and uuid_match) else 0.0
-            else:
-                base_score = 0.0
-            bt.logging.debug(f"[{hotkey[:8]}] passed={passed}, base_score={base_score}")
-        finally:
-            # Always deallocate if allocation succeeded, regardless of SSH/validation outcome
-            if allocation_ok:
-                try:
-                    await self.deallocate_miner(axon, public_key, dendrite)
-                    bt.logging.debug(f"[{hotkey[:8]}] deallocation completed")
-                except Exception as e:
-                    bt.logging.debug(f"[{hotkey[:8]}] deallocation failed - {e}")
+                base_pass = allocation_ok and api_status == "pass" and uuid_match
+                health_ok = None
+                if base_pass and miner_info:
+                    try:
+                        health_ok = perform_health_check(axon, miner_info, self.ssh_private_key)
+                        bt.logging.debug(f"[{hotkey[:8]}] health_check={health_ok}")
+                    except Exception as e:
+                        bt.logging.debug(f"[{hotkey[:8]}] health_check error: {e}")
+                        health_ok = False
+
+                passed = base_pass and (health_ok is not False)
+
+                if api_status == "pass":
+                    base_score = 1.0 if passed else 0.0
+                elif api_status == "pending":
+                    base_score = 1.0 if (allocation_ok and uuid_match) else 0.0
+                else:
+                    base_score = 0.0
+                bt.logging.debug(f"[{hotkey[:8]}] passed={passed}, base_score={base_score}")
+                break  # Validation complete, exit retry loop
+            finally:
+                # Always deallocate if allocation succeeded, regardless of SSH/validation outcome
+                if allocation_ok:
+                    try:
+                        await self.deallocate_miner(axon, public_key, dendrite)
+                        bt.logging.debug(f"[{hotkey[:8]}] deallocation completed")
+                    except Exception as e:
+                        bt.logging.debug(f"[{hotkey[:8]}] deallocation failed - {e}")
 
         if gpu_count == 0 and best_inst is not None:
             gpu_count = api_gpu_count
@@ -1277,7 +1293,7 @@ class Validator:
             bt.logging.info(f"💻 Starting PoG3 validation for {len(self._queryable_uids)} miners")
 
             # Run PoG3 checks in parallel batches with a single shared dendrite
-            batch_size = self.config.get("pog", {}).get("batch_size", 64)
+            batch_size = self.pog_config.get("batch_size", 64)
             items = list(self._queryable_uids.items())
             total_batches = (len(items) + batch_size - 1) // batch_size
 
@@ -1496,20 +1512,21 @@ class Validator:
                 # allocator politely said "busy" or returned invalid status
                 else:
                     if not rsp:
-                        bt.logging.debug(f"[{axon.hotkey[:8]}] No response received for allocation")
+                        # No response (timeout) - treat as transient, allow retry
+                        bt.logging.debug(
+                            f"[{axon.hotkey[:8]}] No response received for allocation "
+                            f"(attempt {attempt}/{self._allocation_max_retries})"
+                        )
+                        # Fall through to retry logic below
                     else:
+                        # Miner explicitly rejected - no point retrying
                         bt.logging.debug(f"[{axon.hotkey[:8]}] allocation rejected: {rsp.get('message', 'no message')}")
-
-                    await self.pubsub_client.publish_miner_allocation(
-                        miner_hotkey=axon.hotkey,
-                        allocation_result=False,
-                        allocation_error=(
-                            'No response received'
-                            if not rsp
-                            else 'Miner allocation request failed'
-                        ),
-                    )
-                    return None
+                        await self.pubsub_client.publish_miner_allocation(
+                            miner_hotkey=axon.hotkey,
+                            allocation_result=False,
+                            allocation_error='Miner allocation request failed',
+                        )
+                        return None
 
             # -------- transient disconnects / 503 ------------------------------
             except ConnectionRefusedError as e:
