@@ -214,12 +214,20 @@ class Validator:
             env_pog_val = int(env_pog) if env_pog else None
         except Exception:
             env_pog_val = None
+        cfg_yaml = {}
         try:
             cfg_yaml = yaml.safe_load(open("config.yaml", "r")) or {}
             cfg_pog_val = int(cfg_yaml.get("pog", {}).get("pog_interval_blocks", 25))
         except Exception:
             cfg_pog_val = 25
         self.pog_interval_blocks = getattr(self.config, "pog_interval_blocks", None) or env_pog_val or cfg_pog_val or 25
+
+        # Allocation sync cadence: config.yaml (pog.allocation_sync_interval_blocks) > default 5
+        try:
+            cfg_alloc_sync_val = int(cfg_yaml.get("pog", {}).get("allocation_sync_interval_blocks", 5))
+        except Exception:
+            cfg_alloc_sync_val = 5
+        self.allocation_sync_interval_blocks = cfg_alloc_sync_val
 
         # Set up logging with the provided configuration and directory.
         bt.logging(config=self.config, logging_dir=self.config.full_path)
@@ -265,6 +273,8 @@ class Validator:
         self._deallocation_timeout_sec = int(vali_cfg.get("deallocation_timeout_sec", 15))
         self._allocation_max_retries = int(vali_cfg.get("allocation_max_retries", 2))
         self._deallocation_max_retries = int(vali_cfg.get("deallocation_max_retries", 3))
+        self._ssh_max_retries = int(vali_cfg.get("ssh_max_retries", 3))
+        self._validation_alloc_max_retries = int(vali_cfg.get("validation_alloc_max_retries", 4))
         self._retry_backoff_sec = float(vali_cfg.get("retry_backoff_sec", 5))
 
         self.pubsub_client = PubSubClient(
@@ -520,6 +530,10 @@ class Validator:
             self._allocation_max_retries = v
         if (v := _safe_int("deallocation_max_retries", 3, min_val=0)) is not None:
             self._deallocation_max_retries = v
+        if (v := _safe_int("ssh_max_retries", 3, min_val=0)) is not None:
+            self._ssh_max_retries = v
+        if (v := _safe_int("validation_alloc_max_retries", 4, min_val=1)) is not None:
+            self._validation_alloc_max_retries = v
         if (v := _safe_float("retry_backoff_sec", 5.0)) is not None:
             self._retry_backoff_sec = v
         if (v := _safe_int("pull_interval", 60)) is not None:
@@ -541,6 +555,14 @@ class Validator:
                 val = int(pog_cfg["pog_interval_blocks"])
                 if val > 0:
                     self.pog_interval_blocks = val
+            except (ValueError, TypeError):
+                pass
+
+        if "allocation_sync_interval_blocks" in pog_cfg:
+            try:
+                val = int(pog_cfg["allocation_sync_interval_blocks"])
+                if val > 0:
+                    self.allocation_sync_interval_blocks = val
             except (ValueError, TypeError):
                 pass
 
@@ -630,7 +652,8 @@ class Validator:
 
                 prev = existing_stats.get(uid, {})
                 base_score = float(prev.get("score", 0.0)) / 100.0
-                gpu_specs = prev.get("gpu_specs")
+                # Only carry forward gpu_specs if miner has a valid PoG score
+                gpu_specs = prev.get("gpu_specs") if base_score > 0 else None
                 allocated_flag = bool(prev.get("allocated", False))
 
                 # Reliability score: prefer W&B aggregate, else keep local value, else neutral 1.0
@@ -763,18 +786,41 @@ class Validator:
         Always sends complete state of all miners (allocated vs free).
         This is simple, self-healing, and the overhead for 250-1000 keys
         every few seconds is negligible (~60KB).
+
+        IMPORTANT: We read from the attestation layer first and merge with
+        local state to avoid race conditions where multiple validators
+        could overwrite each other's allocations. If the remote fetch fails,
+        we skip the sync entirely to avoid overwriting valid remote state.
         """
         try:
-            # 1. Get current allocations from database
+            # 1. Read current state from attestation layer first (required for safe merge)
+            # If this fails, we skip the sync to avoid overwriting remote allocations
+            try:
+                remote_status = self.api_client.fetch_allocations_status(scope="all")
+            except Exception as e:
+                bt.logging.warning(f"Failed to fetch remote allocations, skipping sync: {e}")
+                return
+
+            if remote_status is None or not isinstance(remote_status, dict):
+                bt.logging.warning("Invalid response from attestation layer, skipping sync")
+                return
+
+            # Extract allocated hotkeys from remote state
+            remote_allocations = set()
+            for item in remote_status.get("allocations", []):
+                if item.get("state") == "allocated":
+                    remote_allocations.add(item.get("key"))
+
+            # 2. Get current allocations from local database
             cursor = self.db.get_cursor()
             try:
                 cursor.execute("SELECT hotkey FROM allocation")
                 rows = cursor.fetchall()
-                current_allocations = {row[0] for row in rows}
+                local_allocations = {row[0] for row in rows}
             finally:
                 cursor.close()
 
-            # 2. Get all queryable miner hotkeys (with bounds checking)
+            # 3. Get all queryable miner hotkeys (with bounds checking)
             queryable_uids = self.get_queryable()
             hotkeys_len = len(self.metagraph.hotkeys)
             all_hotkeys = {
@@ -783,16 +829,21 @@ class Validator:
                 if 0 <= uid < hotkeys_len
             }
 
-            # 3. Build full state payload
+            # 4. Merge: a miner is allocated if allocated locally OR remotely
+            # This ensures we never accidentally mark a miner as free when
+            # another validator has allocated it
+            merged_allocations = local_allocations | remote_allocations
+
+            # 5. Build full state payload with merged allocations
             allocations = []
             for hk in all_hotkeys:
-                state = "allocated" if hk in current_allocations else "free"
+                state = "allocated" if hk in merged_allocations else "free"
                 allocations.append({"key": hk, "state": state})
 
             if not allocations:
                 return  # No miners to sync
 
-            # 4. Send to API
+            # 6. Send to API
             result = self.api_client.sync_allocations(allocations)
 
             if result:
@@ -995,28 +1046,32 @@ class Validator:
     async def _fetch_remote_gpu(self, miner_info: dict) -> tuple[bool, Optional[str], Optional[str], int]:
         """
         Fetch primary GPU UUID and name over SSH. Returns (ok, uuid, name, num_gpus).
+        Retries up to ssh_max_retries times with backoff on failure.
         """
-        ssh_timeout = self._ssh_timeout_sec  # capture for closure
-        ssh_private_key = self.ssh_private_key  # capture for closure (key-based auth)
+        ssh_timeout = self._ssh_timeout_sec
+        ssh_private_key = self.ssh_private_key
+        max_retries = self._ssh_max_retries
+        backoff_sec = self._retry_backoff_sec
+        host = miner_info.get("host", "unknown")
 
-        def _run():
+        def _single_attempt():
+            """Single SSH attempt - returns (ok, uuid, name, count) or raises."""
+            ssh = paramiko.SSHClient()
+            ssh.set_missing_host_key_policy(EphemeralContainerHostKeyPolicy())
             try:
-                ssh = paramiko.SSHClient()
-                ssh.set_missing_host_key_policy(EphemeralContainerHostKeyPolicy())
                 ssh.connect(
                     hostname=miner_info["host"],
                     port=int(miner_info.get("port", 22)),
                     username=miner_info["username"],
-                    pkey=ssh_private_key,  # Use key-based auth
+                    pkey=ssh_private_key,
                     timeout=ssh_timeout,
                 )
                 cmd = "nvidia-smi --query-gpu=uuid,name --format=csv,noheader,nounits"
                 stdin, stdout, stderr = ssh.exec_command(cmd, timeout=ssh_timeout)
                 out = stdout.read().decode().strip()
                 err = stderr.read().decode().strip()
-                ssh.close()
                 if err:
-                    bt.logging.debug(f"nvidia-smi error on miner {miner_info.get('host')}: {err}")
+                    bt.logging.debug(f"nvidia-smi error on miner {host}: {err}")
                 lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
                 if not lines:
                     return False, None, None, 0
@@ -1024,11 +1079,31 @@ class Validator:
                 uuid_val = first[0].strip() if len(first) >= 1 else None
                 name_val = first[1].strip() if len(first) >= 2 else None
                 return True, uuid_val or None, name_val or None, len(lines)
-            except Exception as e:
-                bt.logging.debug(f"SSH GPU probe failed: {e}")
-                return False, None, None, 0
+            finally:
+                ssh.close()
 
-        return await asyncio.to_thread(_run)
+        for attempt in range(1, max_retries + 1):
+            try:
+                result = await asyncio.to_thread(_single_attempt)
+                if result[0]:  # Success
+                    return result
+                # nvidia-smi returned empty - might be transient, retry
+                if attempt < max_retries:
+                    bt.logging.debug(
+                        f"SSH GPU probe empty response from {host} "
+                        f"(attempt {attempt}/{max_retries}), retrying..."
+                    )
+                    await asyncio.sleep(backoff_sec * attempt)
+            except Exception as e:
+                bt.logging.debug(
+                    f"SSH GPU probe failed for {host} "
+                    f"(attempt {attempt}/{max_retries}): {e}"
+                )
+                if attempt < max_retries:
+                    await asyncio.sleep(backoff_sec * attempt)
+
+        bt.logging.debug(f"SSH GPU probe exhausted all {max_retries} retries for {host}")
+        return False, None, None, 0
 
     async def _validate_with_uid(self, uid: int, axon: bt.AxonInfo, api_map: dict, dendrite):
         """Wrapper to include uid in result for parallel processing."""
@@ -1082,71 +1157,84 @@ class Validator:
 
         # Test containers use separate SSH port (4445) and per-validator naming
         # All validators can verify GPU UUID via test allocations, regardless of production allocation
+        # Retry entire allocation+SSH flow if SSH probe fails
+        api_uuid = best_inst.primary_gpu_uuid if best_inst else None
+        max_validation_attempts = self._validation_alloc_max_retries
 
-        miner_info = None
-        try:
-            # Skip RSA key generation - send empty public_key, miner returns plain JSON
-            # This is backwards compatible: old miners will fail gracefully, new miners return plain
-            public_key = ""
-            miner_info = await self.allocate_miner(axon, "", "", self.ssh_public_key, dendrite)
-            allocation_ok = miner_info is not None
-        except Exception as e:
-            bt.logging.debug(f"[{hotkey[:8]}] allocation failed - {e}")
+        for validation_attempt in range(1, max_validation_attempts + 1):
+            miner_info = None
             allocation_ok = False
-        bt.logging.debug(f"[{hotkey[:8]}] allocation={'OK' if allocation_ok else 'FAIL'}")
+            gpu_uuid = None
 
-        # Use try/finally to guarantee deallocation whenever allocation succeeds
-        try:
-            if miner_info:
-                try:
-                    ok, uuid_val, name_val, count_val = await self._fetch_remote_gpu(miner_info)
-                    bt.logging.debug(f"[{hotkey[:8]}] SSH probe: ok={ok}, uuid={uuid_val}, gpu={name_val}, count={count_val}")
-                    if ok:
-                        gpu_uuid = uuid_val
-                except Exception as e:
-                    bt.logging.debug(f"[{hotkey[:8]}] SSH probe failed - {e}")
+            try:
+                # Skip RSA key generation - send empty public_key, miner returns plain JSON
+                # This is backwards compatible: old miners will fail gracefully, new miners return plain
+                public_key = ""
+                miner_info = await self.allocate_miner(axon, "", "", self.ssh_public_key, dendrite)
+                allocation_ok = miner_info is not None
+            except Exception as e:
+                bt.logging.debug(f"[{hotkey[:8]}] allocation failed - {e}")
+                allocation_ok = False
+            bt.logging.debug(f"[{hotkey[:8]}] allocation={'OK' if allocation_ok else 'FAIL'} (attempt {validation_attempt}/{max_validation_attempts})")
 
-            api_uuid = best_inst.primary_gpu_uuid if best_inst else None
-            uuid_match = (
-                gpu_uuid is not None
-                and best_inst is not None
-                and api_uuid is not None
-                and gpu_uuid == api_uuid
-            )
-            # Detailed UUID comparison logging
-            if not uuid_match and (gpu_uuid or api_uuid):
-                bt.logging.debug(
-                    f"[{hotkey[:8]}] UUID mismatch: ssh={gpu_uuid} vs api={api_uuid}"
+            # Use try/finally to guarantee deallocation whenever allocation succeeds
+            try:
+                if miner_info:
+                    try:
+                        ok, uuid_val, name_val, count_val = await self._fetch_remote_gpu(miner_info)
+                        bt.logging.debug(f"[{hotkey[:8]}] SSH probe: ok={ok}, uuid={uuid_val}, gpu={name_val}, count={count_val}")
+                        if ok:
+                            gpu_uuid = uuid_val
+                    except Exception as e:
+                        bt.logging.debug(f"[{hotkey[:8]}] SSH probe failed - {e}")
+
+                uuid_match = (
+                    gpu_uuid is not None
+                    and best_inst is not None
+                    and api_uuid is not None
+                    and gpu_uuid == api_uuid
                 )
-            bt.logging.debug(f"[{hotkey[:8]}] uuid_match={uuid_match}, api_status={api_status}")
 
-            base_pass = allocation_ok and api_status == "pass" and uuid_match
-            health_ok = None
-            if base_pass and miner_info:
-                try:
-                    health_ok = perform_health_check(axon, miner_info, self.ssh_private_key)
-                    bt.logging.debug(f"[{hotkey[:8]}] health_check={health_ok}")
-                except Exception as e:
-                    bt.logging.debug(f"[{hotkey[:8]}] health_check error: {e}")
-                    health_ok = False
+                # If allocation succeeded but SSH failed, retry the entire flow
+                if allocation_ok and gpu_uuid is None and validation_attempt < max_validation_attempts:
+                    bt.logging.debug(f"[{hotkey[:8]}] SSH probe failed, will retry full validation")
+                    continue  # Deallocate in finally, then retry
 
-            passed = base_pass and (health_ok is not False)
+                # Detailed UUID comparison logging
+                if not uuid_match and (gpu_uuid or api_uuid):
+                    bt.logging.debug(
+                        f"[{hotkey[:8]}] UUID mismatch: ssh={gpu_uuid} vs api={api_uuid}"
+                    )
+                bt.logging.debug(f"[{hotkey[:8]}] uuid_match={uuid_match}, api_status={api_status}")
 
-            if api_status == "pass":
-                base_score = 1.0 if passed else 0.0
-            elif api_status == "pending":
-                base_score = 1.0 if (allocation_ok and uuid_match) else 0.0
-            else:
-                base_score = 0.0
-            bt.logging.debug(f"[{hotkey[:8]}] passed={passed}, base_score={base_score}")
-        finally:
-            # Always deallocate if allocation succeeded, regardless of SSH/validation outcome
-            if allocation_ok:
-                try:
-                    await self.deallocate_miner(axon, public_key, dendrite)
-                    bt.logging.debug(f"[{hotkey[:8]}] deallocation completed")
-                except Exception as e:
-                    bt.logging.debug(f"[{hotkey[:8]}] deallocation failed - {e}")
+                base_pass = allocation_ok and api_status == "pass" and uuid_match
+                health_ok = None
+                if base_pass and miner_info:
+                    try:
+                        health_ok = perform_health_check(axon, miner_info, self.ssh_private_key)
+                        bt.logging.debug(f"[{hotkey[:8]}] health_check={health_ok}")
+                    except Exception as e:
+                        bt.logging.debug(f"[{hotkey[:8]}] health_check error: {e}")
+                        health_ok = False
+
+                passed = base_pass and (health_ok is not False)
+
+                if api_status == "pass":
+                    base_score = 1.0 if passed else 0.0
+                elif api_status == "pending":
+                    base_score = 1.0 if (allocation_ok and uuid_match) else 0.0
+                else:
+                    base_score = 0.0
+                bt.logging.debug(f"[{hotkey[:8]}] passed={passed}, base_score={base_score}")
+                break  # Validation complete, exit retry loop
+            finally:
+                # Always deallocate if allocation succeeded, regardless of SSH/validation outcome
+                if allocation_ok:
+                    try:
+                        await self.deallocate_miner(axon, public_key, dendrite)
+                        bt.logging.debug(f"[{hotkey[:8]}] deallocation completed")
+                    except Exception as e:
+                        bt.logging.debug(f"[{hotkey[:8]}] deallocation failed - {e}")
 
         if gpu_count == 0 and best_inst is not None:
             gpu_count = api_gpu_count
@@ -1205,7 +1293,7 @@ class Validator:
             bt.logging.info(f"💻 Starting PoG3 validation for {len(self._queryable_uids)} miners")
 
             # Run PoG3 checks in parallel batches with a single shared dendrite
-            batch_size = self.config.get("pog", {}).get("batch_size", 64)
+            batch_size = self.pog_config.get("batch_size", 64)
             items = list(self._queryable_uids.items())
             total_batches = (len(items) + batch_size - 1) // batch_size
 
@@ -1424,20 +1512,21 @@ class Validator:
                 # allocator politely said "busy" or returned invalid status
                 else:
                     if not rsp:
-                        bt.logging.debug(f"[{axon.hotkey[:8]}] No response received for allocation")
+                        # No response (timeout) - treat as transient, allow retry
+                        bt.logging.debug(
+                            f"[{axon.hotkey[:8]}] No response received for allocation "
+                            f"(attempt {attempt}/{self._allocation_max_retries})"
+                        )
+                        # Fall through to retry logic below
                     else:
+                        # Miner explicitly rejected - no point retrying
                         bt.logging.debug(f"[{axon.hotkey[:8]}] allocation rejected: {rsp.get('message', 'no message')}")
-
-                    await self.pubsub_client.publish_miner_allocation(
-                        miner_hotkey=axon.hotkey,
-                        allocation_result=False,
-                        allocation_error=(
-                            'No response received'
-                            if not rsp
-                            else 'Miner allocation request failed'
-                        ),
-                    )
-                    return None
+                        await self.pubsub_client.publish_miner_allocation(
+                            miner_hotkey=axon.hotkey,
+                            allocation_result=False,
+                            allocation_error='Miner allocation request failed',
+                        )
+                        return None
 
             # -------- transient disconnects / 503 ------------------------------
             except ConnectionRefusedError as e:
@@ -1844,7 +1933,7 @@ class Validator:
         block_next_set_weights = self.current_block + weights_rate_limit
         block_next_hardware_info = 1
         block_next_miner_checking = 1
-        block_next_allocation_sync = self.current_block + 1  # Allocation sync on first block
+        block_next_allocation_sync = self.current_block + 1  # First sync on next block, then uses allocation_sync_interval_blocks
 
         time_next_sync_status = None
         time_next_set_weights = None
@@ -1926,10 +2015,10 @@ class Validator:
                         }
                         self.wandb.log_chain_data(chain_data)
 
-                    # Sync allocation status to validation API (every block)
+                    # Sync allocation status to validation API (configurable interval)
                     if self.current_block >= block_next_allocation_sync:
                         await self.sync_allocation_status_to_api()
-                        block_next_allocation_sync = self.current_block + 1
+                        block_next_allocation_sync = self.current_block + self.allocation_sync_interval_blocks
 
                     # Periodically update the weights on the Bittensor blockchain, ~ every 20 minutes
                     if self.current_block - self.last_updated_block > weights_rate_limit:
