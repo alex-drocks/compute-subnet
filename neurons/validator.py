@@ -214,12 +214,20 @@ class Validator:
             env_pog_val = int(env_pog) if env_pog else None
         except Exception:
             env_pog_val = None
+        cfg_yaml = {}
         try:
             cfg_yaml = yaml.safe_load(open("config.yaml", "r")) or {}
             cfg_pog_val = int(cfg_yaml.get("pog", {}).get("pog_interval_blocks", 25))
         except Exception:
             cfg_pog_val = 25
         self.pog_interval_blocks = getattr(self.config, "pog_interval_blocks", None) or env_pog_val or cfg_pog_val or 25
+
+        # Allocation sync cadence: config.yaml (pog.allocation_sync_interval_blocks) > default 5
+        try:
+            cfg_alloc_sync_val = int(cfg_yaml.get("pog", {}).get("allocation_sync_interval_blocks", 5))
+        except Exception:
+            cfg_alloc_sync_val = 5
+        self.allocation_sync_interval_blocks = cfg_alloc_sync_val
 
         # Set up logging with the provided configuration and directory.
         bt.logging(config=self.config, logging_dir=self.config.full_path)
@@ -544,6 +552,14 @@ class Validator:
                 val = int(pog_cfg["pog_interval_blocks"])
                 if val > 0:
                     self.pog_interval_blocks = val
+            except (ValueError, TypeError):
+                pass
+
+        if "allocation_sync_interval_blocks" in pog_cfg:
+            try:
+                val = int(pog_cfg["allocation_sync_interval_blocks"])
+                if val > 0:
+                    self.allocation_sync_interval_blocks = val
             except (ValueError, TypeError):
                 pass
 
@@ -1900,7 +1916,7 @@ class Validator:
         block_next_set_weights = self.current_block + weights_rate_limit
         block_next_hardware_info = 1
         block_next_miner_checking = 1
-        block_next_allocation_sync = self.current_block + 1  # Allocation sync on first block
+        block_next_allocation_sync = self.current_block + 1  # First sync on next block, then uses allocation_sync_interval_blocks
 
         time_next_sync_status = None
         time_next_set_weights = None
@@ -1982,10 +1998,10 @@ class Validator:
                         }
                         self.wandb.log_chain_data(chain_data)
 
-                    # Sync allocation status to validation API (every block)
+                    # Sync allocation status to validation API (configurable interval)
                     if self.current_block >= block_next_allocation_sync:
                         await self.sync_allocation_status_to_api()
-                        block_next_allocation_sync = self.current_block + 1
+                        block_next_allocation_sync = self.current_block + self.allocation_sync_interval_blocks
 
                     # Periodically update the weights on the Bittensor blockchain, ~ every 20 minutes
                     if self.current_block - self.last_updated_block > weights_rate_limit:

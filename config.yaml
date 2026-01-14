@@ -84,6 +84,7 @@ pog:
   allocation_grace_sec: 120
   # Validator scheduling
   pog_interval_blocks: 15
+  allocation_sync_interval_blocks: 5
   batch_size: 64
   # Merkle proof params
   miner_script_path: "neurons/Validator/miner_script_m_merkletree.py"
