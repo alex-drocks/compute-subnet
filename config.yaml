@@ -3,7 +3,7 @@
 # ════════════════════════════════════════════════════════════════════
 attestation_layer:
   # Attestation Layer URL (centralized service for miner status, allocations, PoG results)
-  url: "http://135.181.63.200/v1"
+  url: "http://135.181.8.206/v1"
   # Auth token (can be overridden via environment variable)
   auth_token: ""
   # Timeout settings
@@ -60,13 +60,15 @@ validator:
   block_interval_token_refresh: 600      # ~2 hours
   # Timeouts (seconds)
   pubsub_timeout_sec: 30
-  ssh_timeout_sec: 30
-  allocation_timeout_sec: 20
-  deallocation_timeout_sec: 15
+  ssh_timeout_sec: 5
+  allocation_timeout_sec: 15
+  deallocation_timeout_sec: 5
   # Retries
   allocation_max_retries: 2
-  deallocation_max_retries: 3
-  retry_backoff_sec: 5
+  deallocation_max_retries: 1
+  ssh_max_retries: 2
+  validation_alloc_max_retries: 2
+  retry_backoff_sec: 2
   # Config server
   server_ip: "65.108.33.88"
   server_port: "8000"
@@ -82,8 +84,9 @@ pog:
   rpc_backoff_sec: 20
   allocation_grace_sec: 120
   # Validator scheduling
-  pog_interval_blocks: 15
-  batch_size: 64
+  pog_interval_blocks: 25
+  allocation_sync_interval_blocks: 2
+  batch_size: 128
   # Merkle proof params
   miner_script_path: "neurons/Validator/miner_script_m_merkletree.py"
   time_tolerance: 5

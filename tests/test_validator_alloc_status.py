@@ -21,6 +21,7 @@ async def test_validate_single_validates_allocated_miners():
     """PoGv3 validates all miners via test containers regardless of allocation state."""
     validator = Validator.__new__(Validator)
     validator.ssh_public_key = "ssh-key"
+    validator._validation_alloc_max_retries = 1
     axon = SimpleNamespace(hotkey="hk-allocated", ip="127.0.0.1")
 
     # Mock allocation to return None (simulating test container allocation attempt)
@@ -44,6 +45,7 @@ async def test_validate_single_validates_allocated_miners():
 async def test_validate_single_rechecks_allocation_after_failure(monkeypatch):
     validator = Validator.__new__(Validator)
     validator.ssh_public_key = "ssh-key"
+    validator._validation_alloc_max_retries = 1
 
     async def _alloc_fail(*_args, **_kwargs):
         return None
